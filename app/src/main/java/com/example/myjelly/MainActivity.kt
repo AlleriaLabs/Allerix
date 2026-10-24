@@ -139,7 +139,7 @@ fun LoginScreen(onDone: () -> Unit, onSettings: () -> Unit) {
             Modifier.fillMaxSize().padding(horizontal = 28.dp).padding(bottom = 90.dp),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center
         ) {
-            Image(painterResource(R.drawable.logo), null, Modifier.size(180.dp))
+            Image(painterResource(R.drawable.logo_banner), "Alleria Filmotheque", Modifier.width(280.dp).aspectRatio(4.198f))
             Spacer(Modifier.height(24.dp))
             Text("Sign In", fontSize = 30.sp, fontWeight = FontWeight.Bold, color = Color.White,
                 modifier = Modifier.align(Alignment.Start))
@@ -241,7 +241,7 @@ fun HomeScreen(open: (Item) -> Unit, play: (Item) -> Unit, onSeeAll: (Item) -> U
                 .padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Image(painterResource(R.drawable.logo), "Alleria Filmotheque", Modifier.size(44.dp))
+            Image(painterResource(R.drawable.logo_banner), "Alleria Filmotheque", Modifier.height(34.dp).aspectRatio(4.198f))
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onSettings) { Text("⚙", color = Color.White, fontSize = 22.sp) }
             TextButton(onClick = onLogout) { Text("Sign out", color = Color.White) }

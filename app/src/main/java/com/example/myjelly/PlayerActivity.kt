@@ -117,22 +117,28 @@ class PlayerActivity : ComponentActivity() {
             setTextColor(Color.WHITE); textSize = 22f; setPadding(40, 24, 40, 24)
             setBackgroundColor(0x99000000.toInt()); visibility = View.GONE
         }
-        lockBtn = TextView(this).apply {
-            text = "🔓"; textSize = 26f; setPadding(32, 24, 32, 24); visibility = View.GONE
-            setBackgroundColor(0x66000000)
-            setOnClickListener { toggleLock() }
+        val density = resources.displayMetrics.density
+        fun dp(v: Int) = (v * density).toInt()
+        fun pill(label: String) = TextView(this).apply {
+            text = label; setTextColor(Color.WHITE); textSize = 14f
+            setPadding(dp(14), dp(8), dp(14), dp(8)); visibility = View.GONE
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(0xB3000000.toInt()); cornerRadius = dp(20).toFloat()
+            }
         }
-        settingsBtn = TextView(this).apply {
-            text = "⚙"; setTextColor(Color.WHITE); textSize = 26f; setPadding(32, 24, 32, 24)
-            visibility = View.GONE; setBackgroundColor(0x66000000)
-            setOnClickListener { showPlaybackSettings() }
+        lockBtn = pill("🔓 Lock").apply { setOnClickListener { toggleLock() } }
+        settingsBtn = pill("⚙ Quality & Audio").apply { setOnClickListener { showPlaybackSettings() } }
+        val bottomRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(settingsBtn, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(10) })
+            addView(lockBtn, LinearLayout.LayoutParams(-2, -2))
         }
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             addView(playerView, FrameLayout.LayoutParams(-1, -1))
             addView(hud, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
-            addView(lockBtn, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL).apply { rightMargin = 48 })
-            addView(settingsBtn, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.TOP).apply { rightMargin = 48; topMargin = 32 })
+            addView(bottomRow, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END)
+                .apply { rightMargin = dp(20); bottomMargin = dp(96) })
         }
         setContentView(root)
 
@@ -329,7 +335,7 @@ class PlayerActivity : ComponentActivity() {
 
     private fun toggleLock() {
         locked = !locked
-        lockBtn.text = if (locked) "🔒" else "🔓"
+        lockBtn.text = if (locked) "🔒 Unlock" else "🔓 Lock"
         playerView.useController = !locked
         if (locked) {
             playerView.hideController()
