@@ -16,6 +16,10 @@ object Api {
     var base = SERVER
     var token = ""
     var userId = ""
+    var username = ""
+
+    /** Optional: URL that receives show requests as JSON (e.g. a Discord webhook). Empty = use the share sheet. */
+    const val REQUEST_WEBHOOK = ""
 
     private val http = OkHttpClient()
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
@@ -25,12 +29,13 @@ object Api {
         base = p.getString("server", SERVER) ?: SERVER
         token = p.getString("token", "") ?: ""
         userId = p.getString("user", "") ?: ""
+        username = p.getString("username", "") ?: ""
     }
 
     private fun save(ctx: Context) = ctx.getSharedPreferences("alleria", Context.MODE_PRIVATE).edit()
-        .putString("server", base).putString("token", token).putString("user", userId).apply()
+        .putString("server", base).putString("token", token).putString("user", userId).putString("username", username).apply()
 
-    fun logout(ctx: Context) { token = ""; userId = ""; save(ctx) }
+    fun logout(ctx: Context) { token = ""; userId = ""; username = ""; save(ctx) }
 
     fun normalize(raw: String): String {
         var s = raw.trim().trimEnd('/')
@@ -71,8 +76,44 @@ object Api {
         token = ""
         val body = buildJsonObject { put("Username", user); put("Pw", pw) }.toString()
         val r = json.decodeFromString<AuthResult>(call("POST", "/Users/AuthenticateByName", body))
-        token = r.token; userId = r.user.id
+        token = r.token; userId = r.user.id; username = user
         save(ctx)
+    }
+
+    // ---- account ----
+    suspend fun forgotPassword(user: String): ForgotResult {
+        val body = buildJsonObject { put("EnteredUsername", user) }.toString()
+        return json.decodeFromString(call("POST", "/Users/ForgotPassword", body))
+    }
+
+    suspend fun redeemPin(pin: String): PinResult {
+        val body = buildJsonObject { put("Pin", pin) }.toString()
+        return json.decodeFromString(call("POST", "/Users/ForgotPassword/Pin", body))
+    }
+
+    suspend fun changePassword(currentPw: String, newPw: String) {
+        val body = buildJsonObject { put("CurrentPw", currentPw); put("NewPw", newPw) }.toString()
+        call("POST", "/Users/$userId/Password", body)
+    }
+
+    // ---- show requests ----
+    fun requestText(title: String, year: String, category: String): String =
+        "New request from ${username.ifEmpty { "a user" }}: $title" +
+            (if (year.isNotEmpty()) " ($year)" else "") + " - $category"
+
+    /** Returns true if delivered to REQUEST_WEBHOOK, false if no webhook is configured. */
+    suspend fun sendRequest(title: String, year: String, category: String): Boolean {
+        if (REQUEST_WEBHOOK.isEmpty()) return false
+        val body = buildJsonObject {
+            put("content", requestText(title, year, category))
+            put("title", title); put("year", year); put("category", category); put("requestedBy", username)
+        }.toString()
+        withContext(Dispatchers.IO) {
+            val req = Request.Builder().url(REQUEST_WEBHOOK)
+                .post(body.toRequestBody("application/json".toMediaType())).build()
+            http.newCall(req).execute().use { r -> if (!r.isSuccessful) error("HTTP ${r.code}") }
+        }
+        return true
     }
 
     suspend fun views(): List<Item> =

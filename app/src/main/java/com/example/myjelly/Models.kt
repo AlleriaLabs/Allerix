@@ -24,6 +24,7 @@ import kotlinx.serialization.Serializable
     @SerialName("ParentIndexNumber") val parentIndex: Int? = null,
     @SerialName("SeriesName") val seriesName: String? = null,
     @SerialName("SeriesId") val seriesId: String? = null,
+    @SerialName("ParentId") val parentId: String? = null,
     @SerialName("ImageTags") val imageTags: Map<String, String>? = null,
     @SerialName("BackdropImageTags") val backdropTags: List<String>? = null,
     @SerialName("ParentBackdropItemId") val parentBackdropItemId: String? = null,
@@ -48,4 +49,13 @@ import kotlinx.serialization.Serializable
 @Serializable data class PublicInfo(
     @SerialName("ServerName") val name: String = "",
     @SerialName("Version") val version: String = ""
+)
+
+@Serializable data class ForgotResult(
+    @SerialName("Action") val action: String = "",
+    @SerialName("PinFile") val pinFile: String? = null
+)
+@Serializable data class PinResult(
+    @SerialName("Success") val success: Boolean = false,
+    @SerialName("UsersReset") val users: List<String> = emptyList()
 )

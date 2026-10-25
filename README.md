@@ -2,6 +2,9 @@
 Netflix-style Android client for the Alleria Filmotheque Jellyfin server, with an MX Player-style player.
 Server is built in (Api.kt, `SERVER`) and hidden from the login screen.
 
+Build: push to GitHub and run the "Build APK" workflow (see .github/workflows/build.yml),
+or open in Android Studio and Build > Build APK(s).
+
 Player: swipe left/right half for brightness/volume, swipe sideways to seek, double-tap sides for ±10s,
 pinch to zoom, long-press for 2x, lock button, PiP with Home, resume + progress sync.
 

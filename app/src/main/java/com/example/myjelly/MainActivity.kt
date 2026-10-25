@@ -56,6 +56,8 @@ sealed class Nav {
     data class Grid(val item: Item) : Nav()
     data class Detail(val item: Item) : Nav()
     object Settings : Nav()
+    object RequestShow : Nav()
+    object ClientSettings : Nav()
 }
 
 class MainActivity : ComponentActivity() {
@@ -82,7 +84,7 @@ fun App() {
         MainContent(onLogout = { Api.logout(ctx); loggedIn = false })
     } else if (loginSettings) {
         BackHandler { loginSettings = false }
-        SettingsScreen(back = { loginSettings = false }, onServerChanged = { loginSettings = false })
+        ClientSettingsScreen(back = { loginSettings = false }, onServerChanged = { loginSettings = false }, loggedIn = false)
     } else {
         LoginScreen(onDone = { loggedIn = true }, onSettings = { loginSettings = true })
     }
@@ -112,8 +114,10 @@ fun MainContent(onLogout: () -> Unit) {
     when (val top = stack.lastOrNull()) {
         null -> HomeScreen(open, play, onSeeAll = { stack.add(Nav.Grid(it)) },
             onSettings = { stack.add(Nav.Settings) }, onLogout = { stack.clear(); onLogout() })
-        Nav.Settings -> SettingsScreen(back, onServerChanged = { stack.clear(); onLogout() },
-            onSignOut = { stack.clear(); onLogout() })
+        Nav.Settings -> SettingsMenuScreen(back, onRequest = { stack.add(Nav.RequestShow) },
+            onClient = { stack.add(Nav.ClientSettings) }, onSignOut = { stack.clear(); onLogout() })
+        Nav.RequestShow -> RequestShowScreen(back)
+        Nav.ClientSettings -> ClientSettingsScreen(back, onServerChanged = { stack.clear(); onLogout() }, loggedIn = true)
         is Nav.Grid -> key(top) { GridScreen(top.item, open, back) }
         is Nav.Detail -> key(top) { DetailScreen(top.item, open, play, back) }
     }
@@ -128,6 +132,7 @@ fun LoginScreen(onDone: () -> Unit, onSettings: () -> Unit) {
     var pw by remember { mutableStateOf("") }
     var err by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    var showReset by remember { mutableStateOf(false) }
     val fieldColors = OutlinedTextFieldDefaults.colors(
         focusedBorderColor = Red, unfocusedBorderColor = Color(0xFF555555),
         cursorColor = Red, focusedLabelColor = Red, unfocusedLabelColor = Grey,
@@ -164,11 +169,13 @@ fun LoginScreen(onDone: () -> Unit, onSettings: () -> Unit) {
                     }
                 }
             ) { Text(if (busy) "Signing in…" else "Sign In", fontWeight = FontWeight.Bold) }
+            TextButton(onClick = { showReset = true }) { Text("Forgot password?", color = Grey) }
             if (err.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
                 Text(err, color = Color(0xFFFF6B6B))
             }
         }
+        if (showReset) ResetPasswordDialog(user) { showReset = false }
         TextButton(onClick = onSettings, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
             Text("⚙", fontSize = 24.sp, color = Grey)
         }
@@ -430,30 +437,72 @@ fun EpisodeRow(ep: Item, onClick: () -> Unit) {
 
 // ------------------------------------------------------------------ settings
 @Composable
-fun SettingsScreen(back: () -> Unit, onServerChanged: () -> Unit, onSignOut: (() -> Unit)? = null) {
+private fun appFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedBorderColor = Red, unfocusedBorderColor = Color(0xFF555555),
+    cursorColor = Red, focusedLabelColor = Red, unfocusedLabelColor = Grey,
+    focusedTextColor = Color.White, unfocusedTextColor = Color.White
+)
+
+@Composable
+private fun ScreenHeader(title: String, back: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        TextButton(onClick = back) { Text("‹", color = Color.White, fontSize = 28.sp) }
+        Text(title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun SettingsRow(icon: String, title: String, subtitle: String, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(icon, fontSize = 22.sp, modifier = Modifier.width(40.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            if (subtitle.isNotEmpty()) Text(subtitle, color = Grey, fontSize = 13.sp)
+        }
+        Text("›", color = Grey, fontSize = 22.sp)
+    }
+    HorizontalDivider(color = Color(0xFF222222))
+}
+
+@Composable
+fun SettingsMenuScreen(back: () -> Unit, onRequest: () -> Unit, onClient: () -> Unit, onSignOut: () -> Unit) {
+    Column(Modifier.fillMaxSize().background(Color.Black)) {
+        ScreenHeader("Settings", back)
+        SettingsRow("🎬", "Request a show", "Ask for a movie, series or anime to be added", onRequest)
+        SettingsRow("⚙", "Client settings", "Server address and password", onClient)
+        SettingsRow("⎋", "Sign out", "", onSignOut)
+        Spacer(Modifier.weight(1f))
+        Text("Alleria Filmotheque 1.0", color = Color(0xFF666666), fontSize = 12.sp,
+            modifier = Modifier.padding(20.dp))
+    }
+}
+
+@Composable
+fun ClientSettingsScreen(back: () -> Unit, onServerChanged: () -> Unit, loggedIn: Boolean) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var url by remember { mutableStateOf(Api.base) }
     var status by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    val fieldColors = OutlinedTextFieldDefaults.colors(
-        focusedBorderColor = Red, unfocusedBorderColor = Color(0xFF555555),
-        cursorColor = Red, focusedLabelColor = Red, unfocusedLabelColor = Grey,
-        focusedTextColor = Color.White, unfocusedTextColor = Color.White
-    )
+    var cur by remember { mutableStateOf("") }
+    var new1 by remember { mutableStateOf("") }
+    var new2 by remember { mutableStateOf("") }
+    var pwStatus by remember { mutableStateOf("") }
+    var pwBusy by remember { mutableStateOf(false) }
+    val colors = appFieldColors()
 
     Column(Modifier.fillMaxSize().background(Color.Black).verticalScroll(rememberScrollState())) {
-        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = back) { Text("‹", color = Color.White, fontSize = 28.sp) }
-            Text("Settings", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        }
+        ScreenHeader("Client settings", back)
         Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             Text("SERVER", color = Red, fontSize = 13.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 url, { url = it; status = "" }, label = { Text("Server URL") }, singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                colors = fieldColors, modifier = Modifier.fillMaxWidth()
+                colors = colors, modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -488,24 +537,206 @@ fun SettingsScreen(back: () -> Unit, onServerChanged: () -> Unit, onSignOut: (()
             Text("Changing the server signs you out so you can log in to the new one.",
                 color = Color(0xFF777777), fontSize = 12.sp)
 
-            if (onSignOut != null) {
+            if (loggedIn) {
                 Spacer(Modifier.height(20.dp))
                 HorizontalDivider(color = Color(0xFF333333))
                 Spacer(Modifier.height(16.dp))
-                Text("ACCOUNT", color = Red, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Text("CHANGE PASSWORD", color = Red, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
-                OutlinedButton(onClick = onSignOut, shape = RoundedCornerShape(4.dp)) {
-                    Text("Sign out", color = Color.White)
-                }
+                OutlinedTextField(cur, { cur = it }, label = { Text("Current password") }, singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(), colors = colors, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(new1, { new1 = it }, label = { Text("New password") }, singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(), colors = colors, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(new2, { new2 = it }, label = { Text("Confirm new password") }, singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(), colors = colors, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    enabled = !pwBusy, shape = RoundedCornerShape(4.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Red, contentColor = Color.White),
+                    onClick = {
+                        when {
+                            new1.isEmpty() -> pwStatus = "Enter a new password"
+                            new1 != new2 -> pwStatus = "New passwords don't match"
+                            else -> {
+                                pwBusy = true; pwStatus = "Changing…"
+                                scope.launch {
+                                    pwStatus = try {
+                                        Api.changePassword(cur, new1)
+                                        cur = ""; new1 = ""; new2 = ""
+                                        "✓ Password changed"
+                                    } catch (e: Exception) {
+                                        if (e.message?.contains("40") == true) "Current password is incorrect"
+                                        else "Couldn't change password (${e.message})"
+                                    }
+                                    pwBusy = false
+                                }
+                            }
+                        }
+                    }
+                ) { Text("Change password", fontWeight = FontWeight.Bold) }
+                if (pwStatus.isNotEmpty()) Text(pwStatus, color = Grey, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
             }
+
             Spacer(Modifier.height(20.dp))
             HorizontalDivider(color = Color(0xFF333333))
             Spacer(Modifier.height(16.dp))
             Text("PLAYER", color = Red, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            Text("Open the ⚙ button inside the video player to choose quality (480p–4K) and audio (stereo, mono, 5.1, 7.1).",
+            Text("Inside the video player, tap the quality label (top right) or the sliders button to choose " +
+                "video quality (480p to 4K) and audio output (stereo, mono, 5.1, 7.1).",
                 color = Grey, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
             Spacer(Modifier.height(24.dp))
-            Text("Alleria Filmotheque 1.0", color = Color(0xFF666666), fontSize = 12.sp)
         }
     }
+}
+
+@Composable
+fun RequestShowScreen(back: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var title by remember { mutableStateOf("") }
+    var year by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf("Movie") }
+    var status by remember { mutableStateOf("") }
+    var isError by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    val colors = appFieldColors()
+
+    Column(Modifier.fillMaxSize().background(Color.Black).verticalScroll(rememberScrollState())) {
+        ScreenHeader("Request a show", back)
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            OutlinedTextField(
+                title, { title = it; status = "" }, label = { Text("Title *") }, singleLine = true,
+                colors = colors, modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                year, { if (it.length <= 4 && it.all { c -> c.isDigit() }) { year = it; status = "" } },
+                label = { Text("Year (optional)") }, singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                colors = colors, modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(16.dp))
+            Text("CATEGORY", color = Red, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("Movie", "Series", "Anime").forEach { c ->
+                    Button(
+                        onClick = { category = c }, shape = RoundedCornerShape(20.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (c == category) Red else Color(0xFF2A2A2A),
+                            contentColor = Color.White
+                        )
+                    ) { Text(c) }
+                }
+            }
+            Spacer(Modifier.height(20.dp))
+            Button(
+                enabled = !busy, modifier = Modifier.fillMaxWidth().height(50.dp), shape = RoundedCornerShape(4.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Red, contentColor = Color.White),
+                onClick = {
+                    val t = title.trim()
+                    val thisYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+                    when {
+                        t.isEmpty() -> { status = "Title is required"; isError = true }
+                        year.isNotEmpty() && (year.length != 4 || year.toInt() !in 1888..(thisYear + 3)) ->
+                            { status = "Enter a valid 4-digit year, or leave it empty"; isError = true }
+                        else -> {
+                            busy = true; isError = false; status = "Sending…"
+                            scope.launch {
+                                try {
+                                    if (Api.sendRequest(t, year, category)) {
+                                        status = "✓ Request sent. Thank you!"
+                                        title = ""; year = ""
+                                    } else {
+                                        ctx.startActivity(Intent.createChooser(
+                                            Intent(Intent.ACTION_SEND).apply {
+                                                type = "text/plain"
+                                                putExtra(Intent.EXTRA_SUBJECT, "Show request: $t")
+                                                putExtra(Intent.EXTRA_TEXT, Api.requestText(t, year, category))
+                                            }, "Send request via"))
+                                        status = "Choose an app to send your request to the admin."
+                                    }
+                                } catch (e: Exception) {
+                                    isError = true; status = "Couldn't send request (${e.message})"
+                                }
+                                busy = false
+                            }
+                        }
+                    }
+                }
+            ) { Text("Submit request", fontWeight = FontWeight.Bold) }
+            if (status.isNotEmpty()) Text(status, color = if (isError) Color(0xFFFF6B6B) else Grey,
+                fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp))
+        }
+    }
+}
+
+@Composable
+fun ResetPasswordDialog(initialUser: String, onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var user by remember { mutableStateOf(initialUser) }
+    var pin by remember { mutableStateOf("") }
+    var stage by remember { mutableStateOf(0) }   // 0 = enter username, 1 = enter PIN, 2 = done
+    var message by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    val colors = appFieldColors()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF181818),
+        title = { Text("Reset password", color = Color.White) },
+        text = {
+            Column {
+                when (stage) {
+                    0 -> {
+                        Text("Enter your username and we'll start a password reset.", color = Grey, fontSize = 14.sp)
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedTextField(user, { user = it }, label = { Text("Username") }, singleLine = true,
+                            colors = colors, modifier = Modifier.fillMaxWidth())
+                    }
+                    1 -> {
+                        Text("Enter the reset PIN from the server administrator.", color = Grey, fontSize = 14.sp)
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedTextField(pin, { pin = it }, label = { Text("PIN") }, singleLine = true,
+                            colors = colors, modifier = Modifier.fillMaxWidth())
+                    }
+                    else -> {}
+                }
+                if (message.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(message, color = Color.White, fontSize = 13.sp)
+                }
+            }
+        },
+        confirmButton = {
+            if (stage != 2) TextButton(
+                enabled = !busy && (if (stage == 0) user.isNotBlank() else pin.isNotBlank()),
+                onClick = {
+                    busy = true; message = ""
+                    scope.launch {
+                        try {
+                            if (stage == 0) {
+                                val r = Api.forgotPassword(user.trim())
+                                when (r.action) {
+                                    "PinCode" -> { stage = 1; message = "A reset PIN was created on the server. Ask the administrator for it." }
+                                    "InNetworkRequired" -> message = "Password reset only works on the server's local network. Contact the administrator."
+                                    else -> message = "Automatic reset isn't available. Please contact the server administrator."
+                                }
+                            } else {
+                                val r = Api.redeemPin(pin.trim())
+                                if (r.success) {
+                                    stage = 2
+                                    message = "Password reset. Sign in with an empty password, then set a new one in Settings, Client settings, Change password."
+                                } else message = "That PIN didn't work."
+                            }
+                        } catch (e: Exception) { message = "Couldn't reach the server. Contact the administrator." }
+                        busy = false
+                    }
+                }
+            ) { Text(if (stage == 0) "Send" else "Reset", color = Red) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(if (stage == 2) "Close" else "Cancel", color = Grey) } }
+    )
 }
