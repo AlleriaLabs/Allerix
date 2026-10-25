@@ -518,7 +518,7 @@ class PlayerActivity : ComponentActivity() {
     private fun showSpeedDialog() {
         val opts = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
         dialog().setTitle("Playback speed")
-            .setSingleChoiceItems(opts.map { speedText(it) }.toTypedArray(), opts.indexOf(speed)) { d, which ->
+            .setSingleChoiceItems(opts.map { speedText(it) }.toTypedArray(), opts.indexOfFirst { it == speed }.coerceAtLeast(0)) { d, which ->
                 speed = opts[which]; player.setPlaybackSpeed(speed)
                 speedBtn.text = speedText(speed); d.dismiss()
             }.show()
@@ -574,7 +574,7 @@ class PlayerActivity : ComponentActivity() {
         val modes = intArrayOf(AspectRatioFrameLayout.RESIZE_MODE_FIT, AspectRatioFrameLayout.RESIZE_MODE_FILL,
             AspectRatioFrameLayout.RESIZE_MODE_ZOOM)
         val names = arrayOf("Fit", "Stretch", "Crop")
-        val n = (modes.indexOf(playerView.resizeMode) + 1) % modes.size
+        val n = (modes.indexOfFirst { it == playerView.resizeMode } + 1) % modes.size
         playerView.resizeMode = modes[n]; showHud(names[n])
     }
 
