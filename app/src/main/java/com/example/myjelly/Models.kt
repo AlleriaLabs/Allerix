@@ -59,3 +59,12 @@ import kotlinx.serialization.Serializable
     @SerialName("Success") val success: Boolean = false,
     @SerialName("UsersReset") val users: List<String> = emptyList()
 )
+
+@Serializable data class PlaybackInfo(
+    @SerialName("MediaSources") val sources: List<PlaybackSource> = emptyList(),
+    @SerialName("PlaySessionId") val playSessionId: String? = null
+)
+@Serializable data class PlaybackSource(
+    @SerialName("Id") val id: String = "",
+    @SerialName("TranscodingUrl") val transcodingUrl: String? = null
+)

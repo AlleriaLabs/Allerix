@@ -48,6 +48,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -394,13 +395,14 @@ class PlayerActivity : ComponentActivity() {
     }
 
     // ================================================================= playback
-    private fun buildMediaItem(): MediaItem {
+    private suspend fun buildMediaItem(): MediaItem {
         val b = MediaItem.Builder().setSubtitleConfigurations(subs)
         if (!isTranscoding) {
             b.setUri(Api.streamUrl(itemId, sourceId))
         } else {
-            b.setUri(Api.hlsUrl(itemId, sourceId, quality, audioMode, sessionId))
-                .setMimeType(MimeTypes.APPLICATION_M3U8)
+            val t = Api.transcodeUrl(itemId, sourceId, quality, audioMode, sessionId)
+            sessionId = t.sessionId
+            b.setUri(t.url).setMimeType(MimeTypes.APPLICATION_M3U8)
         }
         return b.build()
     }
@@ -421,8 +423,11 @@ class PlayerActivity : ComponentActivity() {
                 }
             }
             override fun onPlayerError(error: PlaybackException) {
-                showHud(if (isTranscoding) "Transcode failed (${error.errorCodeName}). Try another quality."
-                        else "Playback error (${error.errorCodeName})", 5000)
+                val http = generateSequence<Throwable>(error) { it.cause }
+                    .filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
+                val detail = http?.let { " [HTTP ${it.responseCode} ${it.dataSpec.uri.lastPathSegment}]" } ?: ""
+                showHud(if (isTranscoding) "Transcode failed: ${error.errorCodeName}$detail"
+                        else "Playback error: ${error.errorCodeName}$detail", 8000)
             }
         })
     }
@@ -470,10 +475,13 @@ class PlayerActivity : ComponentActivity() {
     private fun applyPlayback() {
         if (sourceId.isEmpty()) return
         val pos = player.currentPosition
-        player.setMediaItem(buildMediaItem(), pos)
-        player.prepare(); player.play()
         qualityLabel.text = qualityText()
-        showHud("${quality.label} · Audio: ${audioMode.label}", 2000)
+        showHud("Switching to ${quality.label} · Audio: ${audioMode.label}…", 2500)
+        lifecycleScope.launch {
+            val mi = buildMediaItem()
+            player.setMediaItem(mi, pos)
+            player.prepare(); player.play()
+        }
     }
 
     // ================================================================= dialogs

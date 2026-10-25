@@ -5,11 +5,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+
+data class TranscodeInfo(val url: String, val sessionId: String)
 
 object Api {
     const val SERVER = "https://flix.alleriafilmotheque.fyi"
@@ -23,6 +27,8 @@ object Api {
 
     /** Your jfa-go address (e.g. https://jfa.example.com). Empty = hide the "account portal" buttons. */
     const val JFA_URL = "https://flixregister.alleriafilmotheque.fyi"
+    const val ACCOUNT_URL = "$JFA_URL/my/account"
+    const val RESET_PASSWORD_URL = "$JFA_URL/my/account/password/reset"
 
     private val http = OkHttpClient()
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
@@ -188,6 +194,81 @@ object Api {
         else sb.append("&AllowAudioStreamCopy=false&MaxAudioChannels=${a.channels}" +
             "&TranscodingMaxAudioChannels=${a.channels}&AudioBitrate=${a.bitrate}")
         return sb.toString()
+    }
+
+    private fun withParams(url: String, overrides: List<Pair<String, String>>): String {
+        val parts = url.split("?", limit = 2)
+        val query = if (parts.size > 1) parts[1] else ""
+        val keys = overrides.map { it.first.lowercase() }.toSet()
+        val kept = query.split("&").filter { it.isNotEmpty() && it.substringBefore("=").lowercase() !in keys }
+        return parts[0] + "?" + (kept + overrides.map { "${it.first}=${it.second}" }).joinToString("&")
+    }
+
+    /**
+     * Asks the server (PlaybackInfo) for a valid transcoding URL for the chosen quality/audio,
+     * the same way official Jellyfin clients do. Falls back to a hand-built HLS URL if that fails.
+     */
+    suspend fun transcodeUrl(id: String, sourceId: String, q: Quality, a: AudioMode, fallbackSession: String): TranscodeInfo {
+        val ch = if (a == AudioMode.ORIGINAL) 6 else a.channels
+        val audioBr = if (a == AudioMode.ORIGINAL) 384_000 else a.bitrate
+        val maxBitrate = if (q == Quality.ORIGINAL) 120_000_000 else q.videoBitrate + audioBr
+        try {
+            val profile = buildJsonObject {
+                put("Name", "Alleria Android")
+                put("MaxStreamingBitrate", maxBitrate)
+                put("MaxStaticBitrate", 200_000_000)
+                put("MusicStreamingTranscodingBitrate", 192_000)
+                putJsonArray("DirectPlayProfiles") { }
+                putJsonArray("TranscodingProfiles") {
+                    addJsonObject {
+                        put("Container", "ts"); put("Type", "Video"); put("Protocol", "hls"); put("Context", "Streaming")
+                        put("VideoCodec", if (q == Quality.ORIGINAL) "h264,hevc" else "h264")
+                        put("AudioCodec", "aac"); put("MaxAudioChannels", ch.toString())
+                        put("MinSegments", "2"); put("BreakOnNonKeyFrames", true)
+                    }
+                }
+                putJsonArray("CodecProfiles") {
+                    if (q.height > 0) addJsonObject {
+                        put("Type", "Video")
+                        putJsonArray("Conditions") {
+                            addJsonObject {
+                                put("Condition", "LessThanEqual"); put("Property", "Height")
+                                put("Value", q.height.toString()); put("IsRequired", false)
+                            }
+                        }
+                    }
+                }
+                putJsonArray("SubtitleProfiles") { addJsonObject { put("Format", "srt"); put("Method", "External") } }
+            }
+            val body = buildJsonObject {
+                put("UserId", userId); put("MediaSourceId", sourceId)
+                put("MaxStreamingBitrate", maxBitrate); put("MaxAudioChannels", ch)
+                put("EnableDirectPlay", false); put("EnableDirectStream", false); put("EnableTranscoding", true)
+                put("AllowVideoStreamCopy", q == Quality.ORIGINAL); put("AllowAudioStreamCopy", a == AudioMode.ORIGINAL)
+                put("AutoOpenLiveStream", false)
+                put("DeviceProfile", profile)
+            }.toString()
+            val info = json.decodeFromString<PlaybackInfo>(call("POST", "/Items/$id/PlaybackInfo", body))
+            val src = info.sources.firstOrNull { it.id == sourceId } ?: info.sources.firstOrNull()
+            val tu = src?.transcodingUrl
+            if (!tu.isNullOrEmpty()) {
+                var url = if (tu.startsWith("http")) tu else base + (if (tu.startsWith("/")) tu else "/$tu")
+                val overrides = ArrayList<Pair<String, String>>()
+                if (q != Quality.ORIGINAL) {
+                    overrides += "MaxHeight" to q.height.toString()
+                    overrides += "VideoBitrate" to q.videoBitrate.toString()
+                }
+                if (a != AudioMode.ORIGINAL) {
+                    overrides += "MaxAudioChannels" to a.channels.toString()
+                    overrides += "TranscodingMaxAudioChannels" to a.channels.toString()
+                    overrides += "AudioBitrate" to a.bitrate.toString()
+                }
+                if (!url.contains("api_key=")) overrides += "api_key" to token
+                url = withParams(url, overrides)
+                return TranscodeInfo(url, info.playSessionId ?: fallbackSession)
+            }
+        } catch (e: Exception) { /* fall through to the manual URL */ }
+        return TranscodeInfo(hlsUrl(id, sourceId, q, a, fallbackSession), fallbackSession)
     }
 
     fun subtitleUrl(id: String, sourceId: String, index: Int) =

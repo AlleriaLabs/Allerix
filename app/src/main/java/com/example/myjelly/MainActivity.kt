@@ -132,7 +132,6 @@ fun LoginScreen(onDone: () -> Unit, onSettings: () -> Unit) {
     var pw by remember { mutableStateOf("") }
     var err by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var showReset by remember { mutableStateOf(false) }
     val fieldColors = OutlinedTextFieldDefaults.colors(
         focusedBorderColor = Red, unfocusedBorderColor = Color(0xFF555555),
         cursorColor = Red, focusedLabelColor = Red, unfocusedLabelColor = Grey,
@@ -169,13 +168,14 @@ fun LoginScreen(onDone: () -> Unit, onSettings: () -> Unit) {
                     }
                 }
             ) { Text(if (busy) "Signing in…" else "Sign In", fontWeight = FontWeight.Bold) }
-            TextButton(onClick = { showReset = true }) { Text("Forgot password?", color = Grey) }
+            TextButton(onClick = {
+                ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Api.RESET_PASSWORD_URL)))
+            }) { Text("Forgot password?", color = Grey) }
             if (err.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
                 Text(err, color = Color(0xFFFF6B6B))
             }
         }
-        if (showReset) ResetPasswordDialog(user) { showReset = false }
         TextButton(onClick = onSettings, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
             Text("⚙", fontSize = 24.sp, color = Grey)
         }
@@ -581,7 +581,7 @@ fun ClientSettingsScreen(back: () -> Unit, onServerChanged: () -> Unit, loggedIn
 
             if (loggedIn && Api.JFA_URL.isNotEmpty()) {
                 TextButton(onClick = {
-                    ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Api.JFA_URL)))
+                    ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Api.ACCOUNT_URL)))
                 }) { Text("Manage account on the web (email, Telegram, Discord)", color = Red) }
             }
             Spacer(Modifier.height(20.dp))
@@ -676,66 +676,4 @@ fun RequestShowScreen(back: () -> Unit) {
                 fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp))
         }
     }
-}
-
-@Composable
-fun ResetPasswordDialog(initialUser: String, onDismiss: () -> Unit) {
-    val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var user by remember { mutableStateOf(initialUser) }
-    var sent by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    val colors = appFieldColors()
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF181818),
-        title = { Text("Reset password", color = Color.White) },
-        text = {
-            Column {
-                if (!sent) {
-                    Text("Enter your username. A reset link is sent to the email or messaging account linked to it.",
-                        color = Grey, fontSize = 14.sp)
-                    Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(user, { user = it }, label = { Text("Username") }, singleLine = true,
-                        colors = colors, modifier = Modifier.fillMaxWidth())
-                }
-                if (message.isNotEmpty()) {
-                    Spacer(Modifier.height(10.dp))
-                    Text(message, color = Color.White, fontSize = 13.sp)
-                }
-                if (Api.JFA_URL.isNotEmpty()) {
-                    TextButton(onClick = {
-                        ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Api.JFA_URL)))
-                    }) { Text("Open account portal", color = Red) }
-                }
-            }
-        },
-        confirmButton = {
-            if (!sent) TextButton(
-                enabled = !busy && user.isNotBlank(),
-                onClick = {
-                    busy = true; message = ""
-                    scope.launch {
-                        try {
-                            val r = Api.forgotPassword(user.trim())
-                            when (r.action) {
-                                "PinCode" -> {
-                                    sent = true
-                                    message = "If this account has an email or messaging app linked, a reset link was sent. " +
-                                        "Open it to choose a new password (check spam too)."
-                                }
-                                "InNetworkRequired" -> message =
-                                    "Jellyfin only allows resets from the server's own network. Use the account portal or contact the administrator."
-                                else -> message = "Automatic reset isn't available. Please contact the server administrator."
-                            }
-                        } catch (e: Exception) { message = "Couldn't reach the server. Please try again." }
-                        busy = false
-                    }
-                }
-            ) { Text("Send reset link", color = Red) }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(if (sent) "Close" else "Cancel", color = Grey) } }
-    )
 }
