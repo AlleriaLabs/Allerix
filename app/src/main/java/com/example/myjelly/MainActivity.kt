@@ -579,6 +579,11 @@ fun ClientSettingsScreen(back: () -> Unit, onServerChanged: () -> Unit, loggedIn
                 if (pwStatus.isNotEmpty()) Text(pwStatus, color = Grey, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
             }
 
+            if (loggedIn && Api.JFA_URL.isNotEmpty()) {
+                TextButton(onClick = {
+                    ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Api.JFA_URL)))
+                }) { Text("Manage account on the web (email, Telegram, Discord)", color = Red) }
+            }
             Spacer(Modifier.height(20.dp))
             HorizontalDivider(color = Color(0xFF333333))
             Spacer(Modifier.height(16.dp))
@@ -675,10 +680,10 @@ fun RequestShowScreen(back: () -> Unit) {
 
 @Composable
 fun ResetPasswordDialog(initialUser: String, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var user by remember { mutableStateOf(initialUser) }
-    var pin by remember { mutableStateOf("") }
-    var stage by remember { mutableStateOf(0) }   // 0 = enter username, 1 = enter PIN, 2 = done
+    var sent by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val colors = appFieldColors()
@@ -689,54 +694,48 @@ fun ResetPasswordDialog(initialUser: String, onDismiss: () -> Unit) {
         title = { Text("Reset password", color = Color.White) },
         text = {
             Column {
-                when (stage) {
-                    0 -> {
-                        Text("Enter your username and we'll start a password reset.", color = Grey, fontSize = 14.sp)
-                        Spacer(Modifier.height(10.dp))
-                        OutlinedTextField(user, { user = it }, label = { Text("Username") }, singleLine = true,
-                            colors = colors, modifier = Modifier.fillMaxWidth())
-                    }
-                    1 -> {
-                        Text("Enter the reset PIN from the server administrator.", color = Grey, fontSize = 14.sp)
-                        Spacer(Modifier.height(10.dp))
-                        OutlinedTextField(pin, { pin = it }, label = { Text("PIN") }, singleLine = true,
-                            colors = colors, modifier = Modifier.fillMaxWidth())
-                    }
-                    else -> {}
+                if (!sent) {
+                    Text("Enter your username. A reset link is sent to the email or messaging account linked to it.",
+                        color = Grey, fontSize = 14.sp)
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(user, { user = it }, label = { Text("Username") }, singleLine = true,
+                        colors = colors, modifier = Modifier.fillMaxWidth())
                 }
                 if (message.isNotEmpty()) {
                     Spacer(Modifier.height(10.dp))
                     Text(message, color = Color.White, fontSize = 13.sp)
                 }
+                if (Api.JFA_URL.isNotEmpty()) {
+                    TextButton(onClick = {
+                        ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Api.JFA_URL)))
+                    }) { Text("Open account portal", color = Red) }
+                }
             }
         },
         confirmButton = {
-            if (stage != 2) TextButton(
-                enabled = !busy && (if (stage == 0) user.isNotBlank() else pin.isNotBlank()),
+            if (!sent) TextButton(
+                enabled = !busy && user.isNotBlank(),
                 onClick = {
                     busy = true; message = ""
                     scope.launch {
                         try {
-                            if (stage == 0) {
-                                val r = Api.forgotPassword(user.trim())
-                                when (r.action) {
-                                    "PinCode" -> { stage = 1; message = "A reset PIN was created on the server. Ask the administrator for it." }
-                                    "InNetworkRequired" -> message = "Password reset only works on the server's local network. Contact the administrator."
-                                    else -> message = "Automatic reset isn't available. Please contact the server administrator."
+                            val r = Api.forgotPassword(user.trim())
+                            when (r.action) {
+                                "PinCode" -> {
+                                    sent = true
+                                    message = "If this account has an email or messaging app linked, a reset link was sent. " +
+                                        "Open it to choose a new password (check spam too)."
                                 }
-                            } else {
-                                val r = Api.redeemPin(pin.trim())
-                                if (r.success) {
-                                    stage = 2
-                                    message = "Password reset. Sign in with an empty password, then set a new one in Settings, Client settings, Change password."
-                                } else message = "That PIN didn't work."
+                                "InNetworkRequired" -> message =
+                                    "Jellyfin only allows resets from the server's own network. Use the account portal or contact the administrator."
+                                else -> message = "Automatic reset isn't available. Please contact the server administrator."
                             }
-                        } catch (e: Exception) { message = "Couldn't reach the server. Contact the administrator." }
+                        } catch (e: Exception) { message = "Couldn't reach the server. Please try again." }
                         busy = false
                     }
                 }
-            ) { Text(if (stage == 0) "Send" else "Reset", color = Red) }
+            ) { Text("Send reset link", color = Red) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(if (stage == 2) "Close" else "Cancel", color = Grey) } }
+        dismissButton = { TextButton(onClick = onDismiss) { Text(if (sent) "Close" else "Cancel", color = Grey) } }
     )
 }

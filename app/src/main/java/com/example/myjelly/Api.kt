@@ -21,6 +21,9 @@ object Api {
     /** Optional: URL that receives show requests as JSON (e.g. a Discord webhook). Empty = use the share sheet. */
     const val REQUEST_WEBHOOK = ""
 
+    /** Your jfa-go address (e.g. https://jfa.example.com). Empty = hide the "account portal" buttons. */
+    const val JFA_URL = "https://flixregister.alleriafilmotheque.fyi"
+
     private val http = OkHttpClient()
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
 
