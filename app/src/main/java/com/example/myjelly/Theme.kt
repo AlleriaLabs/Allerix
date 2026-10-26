@@ -56,13 +56,14 @@ fun Badge(text: String) {
 }
 
 @Composable
-fun TabHeader(title: String, onSearch: (() -> Unit)?) {
+fun TabHeader(title: String, onSearch: (() -> Unit)?, onSettings: (() -> Unit)? = null) {
     Row(
-        Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 14.dp, bottom = 8.dp),
+        Modifier.fillMaxWidth().padding(start = 20.dp, end = 4.dp, top = 14.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(title, color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
         if (onSearch != null) IconButton(onClick = onSearch) { SmallIcon(R.drawable.ic_search) }
+        if (onSettings != null) IconButton(onClick = onSettings) { SmallIcon(R.drawable.ic_settings) }
     }
 }
 

@@ -5,7 +5,12 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -66,7 +71,7 @@ fun App() {
     var loggedIn by remember { mutableStateOf(Api.token.isNotEmpty()) }
     var loginSettings by remember { mutableStateOf(false) }
     var loginWeb by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(Unit) { delay(1500); splash = false }
+    LaunchedEffect(Unit) { delay(2400); splash = false }
 
     if (splash) {
         SplashScreen()
@@ -87,14 +92,40 @@ fun App() {
 
 @Composable
 fun SplashScreen() {
+    var started by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { started = true }
+    val logoScale by animateFloatAsState(
+        if (started) 1f else 0.6f, tween(1000, easing = FastOutSlowInEasing), label = "logoScale"
+    )
+    val logoAlpha by animateFloatAsState(if (started) 1f else 0f, tween(900), label = "logoAlpha")
+    val tagAlpha by animateFloatAsState(if (started) 1f else 0f, tween(900, delayMillis = 800), label = "tagAlpha")
+    val pulse = rememberInfiniteTransition(label = "pulse")
+    val glow by pulse.animateFloat(
+        0.15f, 0.40f, infiniteRepeatable(tween(1300, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "glow"
+    )
+    val slide by pulse.animateFloat(
+        0f, 1f, infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Restart), label = "slide"
+    )
     Box(
-        Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Color(0xFF3A0A10), BgDark), radius = 1100f)),
+        Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Red.copy(alpha = glow), BgDark), radius = 1100f)),
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Image(painterResource(R.drawable.logo_square), null, Modifier.size(230.dp))
+            Image(
+                painterResource(R.drawable.logo_square), null,
+                Modifier.size(230.dp).scale(logoScale).alpha(logoAlpha)
+            )
             Spacer(Modifier.height(22.dp))
-            Text("Great stories.\nAnytime. Anywhere.", color = Grey, fontSize = 14.sp, textAlign = TextAlign.Center)
+            Text(
+                "Great stories.\nAnytime. Anywhere.", color = Grey, fontSize = 14.sp,
+                textAlign = TextAlign.Center, modifier = Modifier.alpha(tagAlpha)
+            )
+        }
+        Box(
+            Modifier.align(Alignment.BottomCenter).padding(bottom = 64.dp).width(120.dp).height(3.dp)
+                .clip(RoundedCornerShape(2.dp)).background(Color(0x33FFFFFF))
+        ) {
+            Box(Modifier.offset(x = 80.dp * slide).width(40.dp).fillMaxHeight().background(Red))
         }
     }
 }
@@ -120,6 +151,7 @@ fun MainShell(onLogout: () -> Unit) {
     }
     val back: () -> Unit = { if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) }
     val signOut: () -> Unit = { stack.clear(); onLogout() }
+    val openSettings: () -> Unit = { stack.add(Nav.Settings) }
 
     BackHandler(enabled = stack.isNotEmpty()) { back() }
     BackHandler(enabled = stack.isEmpty() && tab != NavTab.HOME) { tab = NavTab.HOME }
@@ -133,16 +165,16 @@ fun MainShell(onLogout: () -> Unit) {
                 null -> when (tab) {
                     NavTab.HOME -> HomeScreen(
                         onOpen, onPlay, onSeeAll = { stack.add(Nav.Grid(it)) },
-                        onSearch = { stack.add(Nav.Search) }, onLogout = signOut
+                        onSearch = { stack.add(Nav.Search) }, onSettings = openSettings, onLogout = signOut
                     )
-                    NavTab.MOVIES -> LibraryTab("Movies", "Movie", onOpen) { stack.add(Nav.Search) }
-                    NavTab.SHOWS -> LibraryTab("TV Shows", "Series", onOpen) { stack.add(Nav.Search) }
+                    NavTab.MOVIES -> LibraryTab("Movies", "Movie", onOpen, onSearch = { stack.add(Nav.Search) }, onSettings = openSettings)
+                    NavTab.SHOWS -> LibraryTab("TV Shows", "Series", onOpen, onSearch = { stack.add(Nav.Search) }, onSettings = openSettings)
                     NavTab.LIST -> MyListTab(
                         onOpen, onProfile = { stack.add(Nav.ClientSettings) },
-                        onSettings = { stack.add(Nav.Settings) }, onSignOut = signOut,
+                        onSettings = openSettings, onSignOut = signOut,
                         onWeb = { u, t -> stack.add(Nav.Web(u, t)) }
                     )
-                    NavTab.DOWNLOADS -> DownloadsTab(onPlay)
+                    NavTab.DOWNLOADS -> DownloadsTab(onPlay, openSettings)
                 }
                 is Nav.Grid -> key(top) { GridScreen(top.item, onOpen, back) }
                 is Nav.Detail -> key(top) { DetailScreen(top.item, onOpen, onPlay, back) }

@@ -62,7 +62,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun HomeScreen(
     onOpen: (Item) -> Unit, onPlay: (Item) -> Unit, onSeeAll: (Item) -> Unit,
-    onSearch: () -> Unit, onLogout: () -> Unit
+    onSearch: () -> Unit, onSettings: () -> Unit, onLogout: () -> Unit
 ) {
     var featured by remember { mutableStateOf<List<Item>>(emptyList()) }
     var resume by remember { mutableStateOf<List<Item>>(emptyList()) }
@@ -85,10 +85,15 @@ fun HomeScreen(
     val heroes = featured.ifEmpty { trending.take(6) }
     val pager = rememberPagerState(pageCount = { heroes.size })
 
-    LaunchedEffect(pager.currentPage, heroes.size) {
+    // Keyed only on the number of slides: keying on currentPage cancelled the slide animation halfway.
+    LaunchedEffect(heroes.size) {
         if (heroes.size > 1) {
-            delay(5000)
-            pager.animateScrollToPage((pager.currentPage + 1) % heroes.size)
+            while (true) {
+                delay(5000)
+                if (!pager.isScrollInProgress) {
+                    pager.animateScrollToPage((pager.currentPage + 1) % heroes.size, animationSpec = tween(700))
+                }
+            }
         }
     }
     val bgItem = heroes.getOrNull(pager.currentPage)
@@ -121,6 +126,7 @@ fun HomeScreen(
             Image(painterResource(R.drawable.logo_banner), "Alleria Filmotheque", Modifier.height(30.dp).aspectRatio(4.198f))
             Spacer(Modifier.weight(1f))
             IconButton(onClick = onSearch) { SmallIcon(R.drawable.ic_search) }
+            IconButton(onClick = onSettings) { SmallIcon(R.drawable.ic_settings) }
         }
     }
 }
@@ -276,7 +282,7 @@ fun ContinueRow(item: Item, onClick: () -> Unit) {
 
 // ------------------------------------------------------------------ movies / tv shows tabs
 @Composable
-fun LibraryTab(title: String, type: String, onOpen: (Item) -> Unit, onSearch: () -> Unit) {
+fun LibraryTab(title: String, type: String, onOpen: (Item) -> Unit, onSearch: () -> Unit, onSettings: () -> Unit) {
     var list by remember { mutableStateOf<List<Item>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     LaunchedEffect(type) {
@@ -285,7 +291,7 @@ fun LibraryTab(title: String, type: String, onOpen: (Item) -> Unit, onSearch: ()
     }
     AppBackground {
         Column(Modifier.fillMaxSize()) {
-            TabHeader(title, onSearch)
+            TabHeader(title, onSearch, onSettings)
             Box(Modifier.fillMaxSize()) {
                 if (loading) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Red)
                 LazyVerticalGrid(
@@ -474,6 +480,7 @@ fun MyListTab(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("My List", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                IconButton(onClick = onSettings) { SmallIcon(R.drawable.ic_settings) }
                 Box(Modifier.size(36.dp).clip(CircleShape).background(Red), contentAlignment = Alignment.Center) {
                     Text(Api.username.take(1).uppercase().ifEmpty { "A" }, color = Color.White, fontWeight = FontWeight.Bold)
                 }
@@ -491,7 +498,6 @@ fun MyListTab(
                     Image(painterResource(R.drawable.logo_banner), null, Modifier.height(34.dp).aspectRatio(4.198f))
                 }
                 ProfileRow("👤", "My Profile", Api.username, onProfile)
-                ProfileRow("⚙", "Settings", "", onSettings)
                 ProfileRow("?", "Help & Support", "", { help = true })
                 ProfileRow("⎋", "Sign Out", "", onSignOut)
             }
@@ -556,7 +562,7 @@ fun rememberDownloadStarter(): (Item) -> Unit {
 }
 
 @Composable
-fun DownloadsTab(onPlay: (Item) -> Unit) {
+fun DownloadsTab(onPlay: (Item) -> Unit, onSettings: () -> Unit) {
     val ctx = LocalContext.current
     var recs by remember { mutableStateOf(Downloads.list(ctx)) }
     var states by remember { mutableStateOf<Map<String, DlState>>(emptyMap()) }
@@ -570,7 +576,7 @@ fun DownloadsTab(onPlay: (Item) -> Unit) {
     }
     AppBackground {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
-            item { TabHeader("Downloads", null) }
+            item { TabHeader("Downloads", null, onSettings) }
             if (resume.isNotEmpty()) item { ContinueSection(resume, onPlay) }
             item {
                 Text(
