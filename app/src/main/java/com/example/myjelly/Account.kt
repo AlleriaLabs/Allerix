@@ -2,6 +2,11 @@ package com.example.myjelly
 
 import android.content.Context
 import android.content.Intent
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -26,7 +31,7 @@ import kotlinx.coroutines.launch
 
 // ------------------------------------------------------------------ login
 @Composable
-fun LoginScreen(onDone: () -> Unit, onSettings: () -> Unit) {
+fun LoginScreen(onDone: () -> Unit, onSettings: () -> Unit, onForgot: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var user by remember { mutableStateOf("") }
@@ -69,9 +74,7 @@ fun LoginScreen(onDone: () -> Unit, onSettings: () -> Unit) {
                     }
                 }
             ) { Text(if (busy) "Signing in…" else "Sign In", fontWeight = FontWeight.Bold) }
-            TextButton(onClick = {
-                ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Api.RESET_PASSWORD_URL)))
-            }) { Text("Forgot password?", color = Grey) }
+            TextButton(onClick = onForgot) { Text("Forgot password?", color = Grey) }
             if (err.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
                 Text(err, color = Color(0xFFFF6B6B))
@@ -140,7 +143,10 @@ fun SettingsMenuScreen(
 }
 
 @Composable
-fun ClientSettingsScreen(back: () -> Unit, onServerChanged: () -> Unit, loggedIn: Boolean) {
+fun ClientSettingsScreen(
+    back: () -> Unit, onServerChanged: () -> Unit, loggedIn: Boolean,
+    onWeb: (String, String) -> Unit = { _, _ -> }
+) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var url by remember { mutableStateOf(Api.base) }
@@ -239,9 +245,7 @@ fun ClientSettingsScreen(back: () -> Unit, onServerChanged: () -> Unit, loggedIn
             }
 
             if (loggedIn && Api.JFA_URL.isNotEmpty()) {
-                TextButton(onClick = {
-                    ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Api.ACCOUNT_URL)))
-                }) { Text("Manage account on the web (email, Telegram, Discord)", color = Red) }
+                TextButton(onClick = { onWeb(Api.ACCOUNT_URL, "My account") }) { Text("Manage account on the web (email, Telegram, Discord)", color = Red) }
             }
             Spacer(Modifier.height(20.dp))
             HorizontalDivider(color = Color(0xFF333333))
@@ -421,5 +425,42 @@ fun PlaybackSettingsScreen(back: () -> Unit) {
         3 -> ChoiceDialog("Playback speed", listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f).map { speedLabel(it) to it }, speed,
             { speed = it; prefs.edit().putFloat("speed", it).apply() }, { dialog = 0 })
         else -> {}
+    }
+}
+
+// ------------------------------------------------------------------ in-app web page
+@Composable
+fun WebScreen(url: String, title: String, back: () -> Unit) {
+    val holder = remember { arrayOfNulls<WebView>(1) }
+    var progress by remember { mutableStateOf(0) }
+    BackHandler {
+        val w = holder[0]
+        if (w != null && w.canGoBack()) w.goBack() else back()
+    }
+    DisposableEffect(Unit) { onDispose { holder[0]?.destroy() } }
+    Column(Modifier.fillMaxSize().background(BgDark)) {
+        ScreenHeader(title, back)
+        if (progress in 1..99) {
+            LinearProgressIndicator(
+                progress = { progress / 100f }, modifier = Modifier.fillMaxWidth().height(2.dp),
+                color = Red, trackColor = Color.Transparent
+            )
+        }
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { c ->
+                WebView(c).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    setBackgroundColor(android.graphics.Color.BLACK)
+                    webViewClient = WebViewClient()
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onProgressChanged(view: WebView?, newProgress: Int) { progress = newProgress }
+                    }
+                    holder[0] = this
+                    loadUrl(url)
+                }
+            }
+        )
     }
 }

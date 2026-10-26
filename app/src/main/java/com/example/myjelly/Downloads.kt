@@ -1,8 +1,10 @@
 package com.example.myjelly
 
+import android.Manifest
 import android.app.DownloadManager
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
@@ -14,12 +16,33 @@ data class DownloadRec(
     val id: String, val title: String, val file: String, val dmId: Long, val runtimeTicks: Long = 0L
 )
 
-data class DlState(val status: Int, val done: Long, val total: Long)
+data class DlState(val status: Int, val done: Long, val total: Long, val reason: Int = 0)
 
 /** Offline downloads using Android's DownloadManager (files live in the app's private movie folder). */
 object Downloads {
     private val json = Json { ignoreUnknownKeys = true }
     private val ser = ListSerializer(DownloadRec.serializer())
+
+    /** Runtime permissions needed before a download: legacy storage (Android 9 and below) and notifications (13+). */
+    fun requiredPermissions(): List<String> {
+        val l = ArrayList<String>()
+        if (Build.VERSION.SDK_INT <= 28) l.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        if (Build.VERSION.SDK_INT >= 33) l.add(Manifest.permission.POST_NOTIFICATIONS)
+        return l
+    }
+
+    fun reasonText(reason: Int): String = when (reason) {
+        in 100..599 -> "server said HTTP $reason"
+        1001 -> "can't write the file (storage)"
+        1002 -> "unexpected server response"
+        1004 -> "connection error while downloading"
+        1005 -> "too many redirects"
+        1006 -> "not enough storage space"
+        1007 -> "storage not available"
+        1008 -> "can't resume"
+        1009 -> "file already exists"
+        else -> "code $reason"
+    }
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("downloads", Context.MODE_PRIVATE)
 
@@ -39,7 +62,8 @@ object Downloads {
                 return DlState(
                     it.getInt(it.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)),
                     it.getLong(it.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)),
-                    it.getLong(it.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+                    it.getLong(it.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)),
+                    it.getInt(it.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
                 )
             }
         }
@@ -80,6 +104,9 @@ object Downloads {
             val req = DownloadManager.Request(Uri.parse("${Api.base}/Items/${item.id}/Download?api_key=${Api.token}"))
                 .setTitle(title)
                 .setDescription("Alleria Filmotheque")
+                .addRequestHeader("Authorization", Api.authHeader())
+                .setAllowedOverMetered(true)
+                .setAllowedOverRoaming(true)
                 .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 .setDestinationInExternalFilesDir(ctx, Environment.DIRECTORY_MOVIES, name)
             val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager

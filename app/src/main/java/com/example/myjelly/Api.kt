@@ -65,6 +65,8 @@ object Api {
         }
     }
 
+    fun authHeader(): String = auth()
+
     private fun auth(): String {
         val s = "MediaBrowser Client=\"Alleria Filmotheque\", Device=\"Android\", DeviceId=\"alleria-android\", Version=\"1.0\""
         return if (token.isNotEmpty()) "$s, Token=\"$token\"" else s
@@ -139,6 +141,10 @@ object Api {
 
     suspend fun trending(): List<Item> = json.decodeFromString<ItemsResult>(
         call("GET", "/Items?userId=$userId&recursive=true&includeItemTypes=Movie,Series&sortBy=DateCreated&sortOrder=Descending&limit=20&fields=Overview,Genres")
+    ).items
+
+    suspend fun suggestions(): List<Item> = json.decodeFromString<ItemsResult>(
+        call("GET", "/Items?userId=$userId&recursive=true&includeItemTypes=Movie,Series&sortBy=Random&limit=12")
     ).items
 
     suspend fun byType(type: String): List<Item> = json.decodeFromString<ItemsResult>(

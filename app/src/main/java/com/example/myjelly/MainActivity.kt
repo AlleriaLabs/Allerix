@@ -41,6 +41,7 @@ sealed class Nav {
     object RequestShow : Nav()
     object ClientSettings : Nav()
     object PlaybackSettings : Nav()
+    data class Web(val url: String, val title: String) : Nav()
 }
 
 class MainActivity : ComponentActivity() {
@@ -64,17 +65,23 @@ fun App() {
     var splash by remember { mutableStateOf(true) }
     var loggedIn by remember { mutableStateOf(Api.token.isNotEmpty()) }
     var loginSettings by remember { mutableStateOf(false) }
+    var loginWeb by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) { delay(1500); splash = false }
 
     if (splash) {
         SplashScreen()
     } else if (loggedIn) {
         MainShell(onLogout = { Api.logout(ctx); loggedIn = false })
+    } else if (loginWeb != null) {
+        WebScreen(loginWeb.orEmpty(), "Reset password", back = { loginWeb = null })
     } else if (loginSettings) {
         BackHandler { loginSettings = false }
         ClientSettingsScreen(back = { loginSettings = false }, onServerChanged = { loginSettings = false }, loggedIn = false)
     } else {
-        LoginScreen(onDone = { loggedIn = true }, onSettings = { loginSettings = true })
+        LoginScreen(
+            onDone = { loggedIn = true }, onSettings = { loginSettings = true },
+            onForgot = { loginWeb = Api.RESET_PASSWORD_URL }
+        )
     }
 }
 
@@ -132,7 +139,8 @@ fun MainShell(onLogout: () -> Unit) {
                     NavTab.SHOWS -> LibraryTab("TV Shows", "Series", onOpen) { stack.add(Nav.Search) }
                     NavTab.LIST -> MyListTab(
                         onOpen, onProfile = { stack.add(Nav.ClientSettings) },
-                        onSettings = { stack.add(Nav.Settings) }, onSignOut = signOut
+                        onSettings = { stack.add(Nav.Settings) }, onSignOut = signOut,
+                        onWeb = { u, t -> stack.add(Nav.Web(u, t)) }
                     )
                     NavTab.DOWNLOADS -> DownloadsTab(onPlay)
                 }
@@ -144,7 +152,11 @@ fun MainShell(onLogout: () -> Unit) {
                     onPlayback = { stack.add(Nav.PlaybackSettings) }, onSignOut = signOut
                 )
                 Nav.RequestShow -> RequestShowScreen(back)
-                Nav.ClientSettings -> ClientSettingsScreen(back, onServerChanged = signOut, loggedIn = true)
+                Nav.ClientSettings -> ClientSettingsScreen(
+                    back, onServerChanged = signOut, loggedIn = true,
+                    onWeb = { u, t -> stack.add(Nav.Web(u, t)) }
+                )
+                is Nav.Web -> key(top) { WebScreen(top.url, top.title, back) }
                 Nav.PlaybackSettings -> PlaybackSettingsScreen(back)
             }
         }

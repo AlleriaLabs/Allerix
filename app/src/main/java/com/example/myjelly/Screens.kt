@@ -2,7 +2,23 @@
 
 package com.example.myjelly
 
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.withStyle
+import androidx.core.content.ContextCompat
 import android.widget.Toast
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
@@ -311,41 +327,128 @@ fun GridScreen(parent: Item, onOpen: (Item) -> Unit, back: () -> Unit) {
 }
 
 // ------------------------------------------------------------------ search
+private fun highlight(s: String, term: String): AnnotatedString = buildAnnotatedString {
+    val i = if (term.isEmpty()) -1 else s.indexOf(term, ignoreCase = true)
+    if (i < 0) append(s) else {
+        append(s.substring(0, i))
+        withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = Red)) { append(s.substring(i, i + term.length)) }
+        append(s.substring(i + term.length))
+    }
+}
+
 @Composable
 fun SearchScreen(onOpen: (Item) -> Unit, back: () -> Unit) {
+    val ctx = LocalContext.current
+    val focus = LocalFocusManager.current
+    val focusRequester = remember { FocusRequester() }
+    val prefs = remember { ctx.getSharedPreferences("search", Context.MODE_PRIVATE) }
     var q by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<Item>>(emptyList()) }
     var searched by remember { mutableStateOf(false) }
+    var showSuggest by remember { mutableStateOf(true) }
+    var recent by remember {
+        mutableStateOf(prefs.getString("recent", "").orEmpty().split("\n").filter { it.isNotBlank() })
+    }
+    var suggested by remember { mutableStateOf<List<Item>>(emptyList()) }
+
+    fun saveRecent(term: String) {
+        val t = term.trim()
+        if (t.length < 2) return
+        recent = (listOf(t) + recent.filter { !it.equals(t, ignoreCase = true) }).take(8)
+        prefs.edit().putString("recent", recent.joinToString("\n")).apply()
+    }
+
+    LaunchedEffect(Unit) {
+        runCatching { delay(150); focusRequester.requestFocus() }
+        suggested = runCatching { Api.suggestions() }.getOrDefault(emptyList())
+    }
     LaunchedEffect(q) {
-        if (q.trim().length < 2) {
+        if (q.trim().isEmpty()) {
             results = emptyList(); searched = false
         } else {
-            delay(350)
+            delay(250)
             results = runCatching { Api.search(q.trim()) }.getOrDefault(emptyList())
             searched = true
         }
     }
+    val term = q.trim()
+    val suggestions = remember(results, term) {
+        results.map { it.seriesName ?: it.name }.distinct()
+            .sortedBy { !it.startsWith(term, ignoreCase = true) }.take(6)
+    }
+
     AppBackground {
         Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = back) { SmallIcon(R.drawable.ic_back) }
                 OutlinedTextField(
-                    q, { q = it }, singleLine = true, placeholder = { Text("Search movies, shows…", color = Dim) },
+                    q, { q = it; showSuggest = true }, singleLine = true,
+                    placeholder = { Text("Search movies, shows…", color = Dim) },
+                    trailingIcon = {
+                        if (q.isNotEmpty()) IconButton(onClick = { q = ""; showSuggest = true }) {
+                            SmallIcon(R.drawable.ic_close, Grey, 18)
+                        }
+                    },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { showSuggest = false; saveRecent(q); focus.clearFocus() }),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = Red, unfocusedBorderColor = Color(0xFF444444), cursorColor = Red,
                         focusedTextColor = Color.White, unfocusedTextColor = Color.White
                     ),
-                    modifier = Modifier.fillMaxWidth().padding(end = 8.dp)
+                    modifier = Modifier.fillMaxWidth().padding(end = 8.dp).focusRequester(focusRequester)
                 )
-            }
-            if (searched && results.isEmpty()) {
-                Text("No results", color = Grey, modifier = Modifier.padding(24.dp))
             }
             LazyVerticalGrid(
                 GridCells.Adaptive(110.dp), contentPadding = PaddingValues(12.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(results, key = { it.id }) { MediaCard(it, Modifier.fillMaxWidth()) { onOpen(it) } }
+                if (term.isEmpty()) {
+                    if (recent.isNotEmpty()) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text("Recent searches", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                Text("Clear", color = Grey, fontSize = 13.sp, modifier = Modifier.clickable {
+                                    recent = emptyList(); prefs.edit().remove("recent").apply()
+                                })
+                            }
+                        }
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(recent) { r ->
+                                    Text(
+                                        r, color = Color.White, fontSize = 13.sp,
+                                        modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(Color(0xFF2A2A2E))
+                                            .clickable { q = r; showSuggest = false; focus.clearFocus() }
+                                            .padding(horizontal = 14.dp, vertical = 7.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Text("Suggested for you", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 6.dp))
+                    }
+                    items(suggested, key = { it.id }) { MediaCard(it, Modifier.fillMaxWidth()) { onOpen(it) } }
+                } else {
+                    if (showSuggest && suggestions.isNotEmpty()) {
+                        items(suggestions, span = { GridItemSpan(maxLineSpan) }) { s ->
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .clickable { q = s; showSuggest = false; saveRecent(s); focus.clearFocus() }
+                                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                SmallIcon(R.drawable.ic_search, Grey, 18)
+                                Spacer(Modifier.width(14.dp))
+                                Text(highlight(s, term), color = Color.White, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                    if (searched && results.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
+                        Text("No results", color = Grey, modifier = Modifier.padding(12.dp))
+                    }
+                    items(results, key = { it.id }) { MediaCard(it, Modifier.fillMaxWidth()) { saveRecent(term); onOpen(it) } }
+                }
             }
         }
     }
@@ -354,7 +457,8 @@ fun SearchScreen(onOpen: (Item) -> Unit, back: () -> Unit) {
 // ------------------------------------------------------------------ my list + profile
 @Composable
 fun MyListTab(
-    onOpen: (Item) -> Unit, onProfile: () -> Unit, onSettings: () -> Unit, onSignOut: () -> Unit
+    onOpen: (Item) -> Unit, onProfile: () -> Unit, onSettings: () -> Unit, onSignOut: () -> Unit,
+    onWeb: (String, String) -> Unit
 ) {
     val ctx = LocalContext.current
     var favs by remember { mutableStateOf<List<Item>>(emptyList()) }
@@ -405,9 +509,9 @@ fun MyListTab(
             )
         },
         confirmButton = {
-            TextButton(onClick = {
-                ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(Api.ACCOUNT_URL)))
-            }) { Text("Open account portal", color = Red) }
+            TextButton(onClick = { help = false; onWeb(Api.ACCOUNT_URL, "My account") }) {
+                Text("Open account portal", color = Red)
+            }
         },
         dismissButton = { TextButton(onClick = { help = false }) { Text("Close", color = Grey) } }
     )
@@ -429,6 +533,28 @@ private fun ProfileRow(icon: String, title: String, subtitle: String, onClick: (
 }
 
 // ------------------------------------------------------------------ downloads
+/** Returns a function that asks for the needed permissions (if any) and then starts the download. */
+@Composable
+fun rememberDownloadStarter(): (Item) -> Unit {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var pending by remember { mutableStateOf<Item?>(null) }
+    fun go(item: Item) {
+        scope.launch { Toast.makeText(ctx, Downloads.start(ctx, item), Toast.LENGTH_SHORT).show() }
+    }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
+        val item = pending
+        pending = null
+        if (item != null) go(item)
+    }
+    return { item ->
+        val missing = Downloads.requiredPermissions().filter {
+            ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) go(item) else { pending = item; launcher.launch(missing.toTypedArray()) }
+    }
+}
+
 @Composable
 fun DownloadsTab(onPlay: (Item) -> Unit) {
     val ctx = LocalContext.current
@@ -492,7 +618,7 @@ private fun DownloadRow(rec: DownloadRec, st: DlState, onPlay: () -> Unit, onDel
             Text(rec.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             val sub = when {
                 complete -> listOf(fmtSize(st.done), fmtRuntime(rec.runtimeTicks)).filter { it.isNotEmpty() }.joinToString("  ·  ")
-                failed -> "Failed. Delete and try again"
+                failed -> "Failed: ${Downloads.reasonText(st.reason)}. Delete and try again"
                 st.status == -1 -> "Unavailable"
                 else -> "Downloading… $pct%"
             }
@@ -514,6 +640,7 @@ private fun DownloadRow(rec: DownloadRec, st: DlState, onPlay: () -> Unit, onDel
 fun DetailScreen(base: Item, onOpen: (Item) -> Unit, onPlay: (Item) -> Unit, back: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    val startDownload = rememberDownloadStarter()
     var cur by remember { mutableStateOf(base) }
     var seasons by remember { mutableStateOf<List<Item>>(emptyList()) }
     var episodes by remember { mutableStateOf<List<Item>>(emptyList()) }
@@ -584,9 +711,7 @@ fun DetailScreen(base: Item, onOpen: (Item) -> Unit, onPlay: (Item) -> Unit, bac
                             Text("Play", fontWeight = FontWeight.Bold)
                         }
                         MyListButton(cur, Modifier.weight(1f))
-                        if (canDownload) IconButton(onClick = {
-                            scope.launch { Toast.makeText(ctx, Downloads.start(ctx, cur), Toast.LENGTH_SHORT).show() }
-                        }) { SmallIcon(R.drawable.ic_download) }
+                        if (canDownload) IconButton(onClick = { startDownload(cur) }) { SmallIcon(R.drawable.ic_download) }
                     }
                 }
             }
@@ -627,7 +752,7 @@ fun DetailScreen(base: Item, onOpen: (Item) -> Unit, onPlay: (Item) -> Unit, bac
                     items(episodes, key = { it.id }) { ep ->
                         EpisodeRow(
                             ep, onPlay = { onPlay(ep) },
-                            onDownload = { scope.launch { Toast.makeText(ctx, Downloads.start(ctx, ep), Toast.LENGTH_SHORT).show() } }
+                            onDownload = { startDownload(ep) }
                         )
                     }
                 }
