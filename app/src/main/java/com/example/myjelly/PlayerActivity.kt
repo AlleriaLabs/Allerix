@@ -1,6 +1,7 @@
 package com.example.myjelly
 
 import android.app.AlertDialog
+import android.app.Dialog
 import android.app.PictureInPictureParams
 import android.content.ContentValues
 import android.content.pm.ActivityInfo
@@ -8,6 +9,8 @@ import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
 import android.net.Uri
@@ -47,6 +50,7 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -56,18 +60,18 @@ import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.abs
 
 /**
- * MX Player-style player with a custom control layout:
- * top bar (back, title, audio/subtitle tracks, quality, menu), shortcut circles (audio output, speed,
- * screenshot, audio-only, rotate, more), seek bar, and bottom row (lock, prev/play/next, aspect, PiP).
+ * Player styled after the Alleria mockup: top bar, big centre controls (10s back / play / 10s forward),
+ * red seek bar, and a glass panel with Lock, Audio & Subtitles, Playback Speed and More.
  */
 @OptIn(UnstableApi::class)
 class PlayerActivity : ComponentActivity() {
-    private val accent = 0xFF4FB3FF.toInt()
+    private val accent = 0xFFE50914.toInt()
 
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
@@ -76,22 +80,15 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var controls: FrameLayout
     private lateinit var lockOverlay: ImageView
     private lateinit var titleView: TextView
-    private lateinit var qualityLabel: TextView
-    private lateinit var speedBtn: TextView
-    private lateinit var phonesBtn: ImageView
-    private lateinit var chevBtn: ImageView
-    private lateinit var loopBtn: ImageView
-    private lateinit var skipBtn: TextView
     private lateinit var seek: SeekBar
     private lateinit var curTime: TextView
     private lateinit var durTime: TextView
     private lateinit var playBtn: ImageView
-    private lateinit var prevBtn: ImageView
-    private lateinit var nextBtn: ImageView
     private lateinit var audio: AudioManager
     private val handler = Handler(Looper.getMainLooper())
 
     private var itemId = ""
+    private var offlinePath: String? = null
     private var sourceId = ""
     private var sessionId = UUID.randomUUID().toString().replace("-", "")
     private var subs: List<MediaItem.SubtitleConfiguration> = emptyList()
@@ -106,6 +103,7 @@ class PlayerActivity : ComponentActivity() {
     private var scrubbing = false
     private var audioOnly = false
     private var loopOne = false
+    private var autoPlayNext = true
     private var speed = 1f
 
     private enum class Mode { NONE, SEEK, BRIGHT, VOLUME }
@@ -115,7 +113,9 @@ class PlayerActivity : ComponentActivity() {
     private var brightness = 0.5f
     private var volF = 0f
 
-    private val isTranscoding get() = quality != Quality.ORIGINAL || audioMode != AudioMode.ORIGINAL
+    private val isTranscoding get() = offlinePath == null && (quality != Quality.ORIGINAL || audioMode != AudioMode.ORIGINAL)
+    private val hasNext get() = siblingIndex >= 0 && siblingIndex < siblings.size - 1
+    private val hasPrev get() = siblingIndex > 0
 
     private val hideHud = Runnable { hud.visibility = View.GONE }
     private val autoHide = Runnable { hideControls() }
@@ -135,6 +135,7 @@ class PlayerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Api.load(this)
         itemId = intent.getStringExtra("id") ?: return finish()
+        offlinePath = intent.getStringExtra("file")
         audio = getSystemService(AUDIO_SERVICE) as AudioManager
 
         val prefs = getSharedPreferences("player", MODE_PRIVATE)
@@ -142,6 +143,8 @@ class PlayerActivity : ComponentActivity() {
             .getOrDefault(Quality.ORIGINAL)
         audioMode = runCatching { AudioMode.valueOf(prefs.getString("audio", "ORIGINAL") ?: "ORIGINAL") }
             .getOrDefault(AudioMode.ORIGINAL)
+        speed = prefs.getFloat("speed", 1f)
+        autoPlayNext = prefs.getBoolean("autoplay", true)
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -155,6 +158,7 @@ class PlayerActivity : ComponentActivity() {
             DefaultRenderersFactory(this)
                 .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
         ).setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000).build()
+        player.setPlaybackSpeed(speed)
 
         playerView = PlayerView(this).apply {
             player = this@PlayerActivity.player
@@ -169,7 +173,7 @@ class PlayerActivity : ComponentActivity() {
         loadAndPlay()
     }
 
-    // ================================================================= UI
+    // ================================================================= UI building
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private fun circleBg() = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x99181E30.toInt()) }
@@ -180,19 +184,30 @@ class PlayerActivity : ComponentActivity() {
         layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
     }
 
-    private fun circle(res: Int, size: Int = 44) = ImageView(this).apply {
-        setImageResource(res); setColorFilter(Color.WHITE)
-        setPadding(dp(10), dp(10), dp(10), dp(10)); background = circleBg()
-        layoutParams = LinearLayout.LayoutParams(dp(size), dp(size)).apply { rightMargin = dp(12) }
+    /** 10-second skip button: a circular arrow with "10" in the middle. */
+    private fun skipButton(forward: Boolean): FrameLayout = FrameLayout(this).apply {
+        layoutParams = LinearLayout.LayoutParams(dp(58), dp(58))
+        addView(ImageView(context).apply {
+            setImageResource(R.drawable.ic_replay); setColorFilter(Color.WHITE)
+            scaleX = if (forward) -1f else 1f
+        }, FrameLayout.LayoutParams(-1, -1))
+        addView(TextView(context).apply {
+            text = "10"; setTextColor(Color.WHITE); textSize = 12f
+            setTypeface(typeface, Typeface.BOLD); gravity = Gravity.CENTER
+        }, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
     }
 
-    private fun textCircle(label: String) = TextView(this).apply {
-        text = label; setTextColor(Color.WHITE); textSize = 15f; setTypeface(typeface, android.graphics.Typeface.BOLD)
-        gravity = Gravity.CENTER; background = circleBg()
-        layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin = dp(12) }
+    private fun panelItem(res: Int, label: String): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+        setPadding(0, dp(10), 0, dp(10))
+        layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        addView(ImageView(context).apply { setImageResource(res); setColorFilter(Color.WHITE) },
+            LinearLayout.LayoutParams(dp(24), dp(24)))
+        addView(TextView(context).apply {
+            text = label; setTextColor(0xFFCCCCCC.toInt()); textSize = 11f
+            gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0)
+        })
     }
-
-    private fun act(v: View, f: () -> Unit) = v.setOnClickListener { scheduleHide(); f() }
 
     private fun buildUi() {
         // ---- top bar
@@ -202,46 +217,30 @@ class PlayerActivity : ComponentActivity() {
             setTextColor(Color.WHITE); textSize = 17f; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
             setPadding(dp(4), 0, dp(8), 0); gravity = Gravity.CENTER_VERTICAL
         }
-        val audioTrackBtn = icon(R.drawable.ic_music)
-        val subBtn = icon(R.drawable.ic_subtitles)
-        qualityLabel = TextView(this).apply {
-            text = qualityText(); setTextColor(Color.WHITE); textSize = 14f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            gravity = Gravity.CENTER; setPadding(dp(10), 0, dp(10), 0)
-            layoutParams = LinearLayout.LayoutParams(-2, dp(48))
-        }
-        val moreBtn = icon(R.drawable.ic_more)
+        val moreTop = icon(R.drawable.ic_more)
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(6), dp(8), dp(16))
+            setPadding(dp(8), dp(6), dp(8), dp(18))
             background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xCC000000.toInt(), 0))
             addView(backBtn)
             addView(titleView, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(audioTrackBtn); addView(subBtn); addView(qualityLabel); addView(moreBtn)
+            addView(moreTop)
         }
 
-        // ---- shortcut circles
-        val tuneBtn = circle(R.drawable.ic_tune)
-        speedBtn = textCircle(speedText(speed))
-        val shotBtn = circle(R.drawable.ic_camera)
-        phonesBtn = circle(R.drawable.ic_headphones)
-        val rotateBtn = circle(R.drawable.ic_rotate)
-        chevBtn = circle(R.drawable.ic_chevron, 32).apply { setPadding(dp(4), dp(4), dp(4), dp(4)) }
-        loopBtn = circle(R.drawable.ic_repeat).apply { visibility = View.GONE }
-        skipBtn = textCircle("+90s").apply { textSize = 12f; visibility = View.GONE }
-        val shortcuts = LinearLayout(this).apply {
+        // ---- centre controls
+        val rewBtn = skipButton(false)
+        playBtn = icon(R.drawable.ic_pause, 76, 14)
+        val fwdBtn = skipButton(true)
+        val center = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(tuneBtn); addView(speedBtn); addView(shotBtn); addView(phonesBtn)
-            addView(rotateBtn); addView(chevBtn); addView(loopBtn); addView(skipBtn)
+            addView(rewBtn, LinearLayout.LayoutParams(dp(58), dp(58)).apply { rightMargin = dp(44) })
+            addView(playBtn, LinearLayout.LayoutParams(dp(76), dp(76)))
+            addView(fwdBtn, LinearLayout.LayoutParams(dp(58), dp(58)).apply { leftMargin = dp(44) })
         }
 
-        // ---- bottom: seek row
-        curTime = TextView(this).apply {
-            text = "00:00"; setTextColor(Color.WHITE); textSize = 14f; minWidth = dp(48); gravity = Gravity.CENTER
-        }
-        durTime = TextView(this).apply {
-            text = "--:--"; setTextColor(Color.WHITE); textSize = 14f; minWidth = dp(48); gravity = Gravity.CENTER
-        }
+        // ---- seek bar + times
+        curTime = TextView(this).apply { text = "00:00"; setTextColor(Color.WHITE); textSize = 13f }
+        durTime = TextView(this).apply { text = "--:--"; setTextColor(Color.WHITE); textSize = 13f }
         seek = SeekBar(this).apply {
             progressTintList = ColorStateList.valueOf(accent)
             thumbTintList = ColorStateList.valueOf(accent)
@@ -257,53 +256,42 @@ class PlayerActivity : ComponentActivity() {
                 scrubbing = false; player.seekTo(s.progress.toLong()); scheduleHide()
             }
         })
-        val seekRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), 0, dp(16), 0)
-            addView(curTime)
-            addView(seek, LinearLayout.LayoutParams(0, dp(36), 1f))
+        val timesRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(20), 0, dp(20), dp(8))
+            addView(curTime, LinearLayout.LayoutParams(0, -2, 1f))
             addView(durTime)
         }
 
-        // ---- bottom: button row
-        val lockBtn = icon(R.drawable.ic_lock_open)
-        prevBtn = icon(R.drawable.ic_prev, 48, 10)
-        playBtn = icon(R.drawable.ic_pause, 64, 12)
-        nextBtn = icon(R.drawable.ic_next, 48, 10)
-        val center = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(prevBtn, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(28) })
-            addView(playBtn, LinearLayout.LayoutParams(dp(64), dp(64)))
-            addView(nextBtn, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(28) })
-        }
-        val aspectBtn = icon(R.drawable.ic_aspect)
-        val pipBtn = icon(R.drawable.ic_pip)
-        val right = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(aspectBtn); addView(pipBtn, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(8) })
-        }
-        val buttonRow = FrameLayout(this).apply {
-            setPadding(dp(16), 0, dp(16), dp(8))
-            addView(lockBtn, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.START or Gravity.CENTER_VERTICAL))
-            addView(center, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
-            addView(right, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL))
+        // ---- glass action panel
+        val lockItem = panelItem(R.drawable.ic_lock_open, "Lock")
+        val audioItem = panelItem(R.drawable.ic_subtitles, "Audio &\nSubtitles")
+        val speedItem = panelItem(R.drawable.ic_schedule, "Playback\nSpeed")
+        val moreItem = panelItem(R.drawable.ic_more_horiz, "More")
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply {
+                setColor(0xCC141418.toInt()); cornerRadius = dp(18).toFloat(); setStroke(dp(1), 0x33FFFFFF)
+            }
+            addView(lockItem); addView(audioItem); addView(speedItem); addView(moreItem)
         }
         val bottomBar = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(24), 0, 0)
-            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0, 0xCC000000.toInt()))
-            addView(seekRow); addView(buttonRow)
+            setPadding(0, dp(28), 0, 0)
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0, 0xDD000000.toInt()))
+            addView(seek, LinearLayout.LayoutParams(-1, dp(32)).apply { setMargins(dp(8), 0, dp(8), 0) })
+            addView(timesRow)
+            addView(panel, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(16), dp(4), dp(16), dp(12)) })
         }
 
         controls = FrameLayout(this).apply {
             addView(topBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
-            addView(shortcuts, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START)
-                .apply { topMargin = dp(64); leftMargin = dp(16) })
+            addView(center, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
             addView(bottomBar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
         }
 
         hud = TextView(this).apply {
-            setTextColor(Color.WHITE); textSize = 22f; setPadding(40, 24, 40, 24)
+            setTextColor(Color.WHITE); textSize = 20f; setPadding(40, 24, 40, 24)
             setBackgroundColor(0x99000000.toInt()); visibility = View.GONE
         }
         spinner = ProgressBar(this).apply {
@@ -326,45 +314,162 @@ class PlayerActivity : ComponentActivity() {
 
         // ---- actions
         act(backBtn) { finish() }
-        act(audioTrackBtn) { showTrackDialog(C.TRACK_TYPE_AUDIO, "Audio track") }
-        act(subBtn) { showTrackDialog(C.TRACK_TYPE_TEXT, "Subtitles") }
-        act(qualityLabel) { showPlaybackSettings(showVideo = true, showAudio = false) }
-        act(moreBtn) { showPlaybackSettings(showVideo = true, showAudio = true) }
-        act(tuneBtn) { showPlaybackSettings(showVideo = false, showAudio = true) }
-        act(speedBtn) { showSpeedDialog() }
-        act(shotBtn) { takeScreenshot() }
-        act(phonesBtn) { toggleAudioOnly() }
-        act(rotateBtn) { rotateScreen() }
-        act(chevBtn) {
-            val open = loopBtn.visibility != View.VISIBLE
-            loopBtn.visibility = if (open) View.VISIBLE else View.GONE
-            skipBtn.visibility = if (open) View.VISIBLE else View.GONE
-            chevBtn.rotation = if (open) 180f else 0f
-        }
-        act(loopBtn) {
-            loopOne = !loopOne
-            player.repeatMode = if (loopOne) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-            loopBtn.setColorFilter(if (loopOne) accent else Color.WHITE)
-            showHud(if (loopOne) "Repeat: on" else "Repeat: off")
-        }
-        act(skipBtn) { seekBy(90_000); showHud("+90s") }
-        act(lockBtn) { toggleLock() }
-        act(prevBtn) {
-            if (siblingIndex > 0) switchTo(siblings[siblingIndex - 1].id) else player.seekTo(0)
-        }
-        act(nextBtn) {
-            if (siblingIndex >= 0 && siblingIndex < siblings.size - 1) switchTo(siblings[siblingIndex + 1].id)
-            else showHud("No next episode")
-        }
+        act(moreTop) { showMoreSheet() }
+        act(rewBtn) { seekBy(-10_000); showHud("-10s") }
+        act(fwdBtn) { seekBy(10_000); showHud("+10s") }
         act(playBtn) { if (player.isPlaying) player.pause() else player.play() }
-        act(aspectBtn) { cycleAspect() }
-        act(pipBtn) { enterPip() }
+        act(lockItem) { toggleLock() }
+        act(audioItem) { showAudioSubsSheet() }
+        act(speedItem) { showSpeedSheet() }
+        act(moreItem) { showMoreSheet() }
         lockOverlay.setOnClickListener { toggleLock() }
     }
 
-    private fun qualityText() = if (quality == Quality.ORIGINAL) "ORIG" else quality.label.substringBefore(' ')
-    private fun speedText(f: Float) = (if (f % 1f == 0f) f.toInt().toString() else f.toString()) + "X"
+    private fun act(v: View, f: () -> Unit) = v.setOnClickListener { scheduleHide(); f() }
 
+    // ---- bottom sheets (dark glass, rounded top corners)
+    private fun sheet(title: String, content: (LinearLayout, Dialog) -> Unit) {
+        val d = Dialog(this, android.R.style.Theme_Material_Dialog_NoActionBar)
+        val r = dp(22).toFloat()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(14), dp(20), dp(22))
+            background = GradientDrawable().apply {
+                setColor(0xF2141418.toInt()); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+            }
+        }
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(context).apply {
+                text = title; setTextColor(Color.WHITE); textSize = 18f; setTypeface(typeface, Typeface.BOLD)
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(TextView(context).apply {
+                text = "✕"; setTextColor(Color.WHITE); textSize = 20f
+                setPadding(dp(12), dp(6), dp(4), dp(6)); setOnClickListener { d.dismiss() }
+            })
+        }
+        box.addView(head)
+        content(box, d)
+        d.setContentView(ScrollView(this).apply { addView(box) })
+        d.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setGravity(Gravity.BOTTOM)
+            setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
+        }
+        d.show()
+    }
+
+    private fun sectionLabel(text: String) = TextView(this).apply {
+        this.text = text; setTextColor(Color.WHITE); textSize = 15f
+        setTypeface(typeface, Typeface.BOLD); setPadding(0, dp(16), 0, dp(4))
+    }
+
+    private fun radioGroup(base: Int, labels: List<String>, checked: Int, onPick: (Int) -> Unit): RadioGroup =
+        RadioGroup(this).apply {
+            labels.forEachIndexed { i, l ->
+                addView(RadioButton(context).apply {
+                    id = base + i; text = l; setTextColor(Color.WHITE); textSize = 15f
+                    buttonTintList = ColorStateList.valueOf(accent); setPadding(dp(8), dp(10), 0, dp(10))
+                })
+            }
+            if (checked >= 0) check(base + checked)
+            setOnCheckedChangeListener { _, id -> onPick(id - base) }
+        }
+
+    private fun sheetRow(label: String, value: String, onClick: () -> Unit): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, dp(14), 0, dp(14))
+        addView(TextView(context).apply { text = label; setTextColor(Color.WHITE); textSize = 16f },
+            LinearLayout.LayoutParams(0, -2, 1f))
+        addView(TextView(context).apply { text = value; setTextColor(0xFF9A9AA0.toInt()); textSize = 14f })
+        setOnClickListener { onClick() }
+    }
+
+    private fun trackLabel(g: Tracks.Group, i: Int): String {
+        val f = g.getTrackFormat(0)
+        val lang = f.language?.let { Locale(it).displayLanguage }?.takeIf { it.isNotBlank() }
+        return listOfNotNull(f.label, lang).distinct().joinToString(" · ").ifEmpty { "Track ${i + 1}" }
+    }
+
+    private fun showAudioSubsSheet() = sheet("Audio & Subtitles") { box, _ ->
+        val audioGroups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.isSupported }
+        val textGroups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
+        box.addView(sectionLabel("Audio"))
+        if (audioGroups.isEmpty()) {
+            box.addView(TextView(this).apply { text = "No audio tracks"; setTextColor(0xFF9A9AA0.toInt()) })
+        } else {
+            val labels = audioGroups.mapIndexed { i, g -> trackLabel(g, i) }
+            val sel = audioGroups.indexOfFirst { it.isSelected }.coerceAtLeast(0)
+            box.addView(radioGroup(100, labels, sel) { i ->
+                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                    .setOverrideForType(TrackSelectionOverride(audioGroups[i].mediaTrackGroup, 0)).build()
+            })
+        }
+        box.addView(sectionLabel("Subtitles"))
+        val labels = listOf("Off") + textGroups.mapIndexed { i, g -> trackLabel(g, i) }
+        val textOff = player.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+        val selText = textGroups.indexOfFirst { it.isSelected }
+        val checked = if (textOff || selText < 0) 0 else selText + 1
+        box.addView(radioGroup(200, labels, checked) { i ->
+            val b = player.trackSelectionParameters.buildUpon()
+            if (i == 0) b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            else b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .setOverrideForType(TrackSelectionOverride(textGroups[i - 1].mediaTrackGroup, 0))
+            player.trackSelectionParameters = b.build()
+        })
+        if (isTranscoding) box.addView(TextView(this).apply {
+            text = "While transcoding, only one audio track is available. Choose Original quality and audio to switch tracks."
+            setTextColor(0xFF777777.toInt()); textSize = 11f; setPadding(0, dp(12), 0, 0)
+        })
+    }
+
+    private fun showSpeedSheet() = sheet("Playback Speed") { box, dlg ->
+        val speeds = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+        val labels = speeds.map { speedText(it) }
+        box.addView(radioGroup(100, labels, speeds.indexOfFirst { it == speed }.coerceAtLeast(0)) { i ->
+            speed = speeds[i]; player.setPlaybackSpeed(speed); dlg.dismiss()
+        })
+    }
+
+    private fun showQualitySheet() = sheet("Video quality") { box, dlg ->
+        val all = Quality.values()
+        box.addView(radioGroup(100, all.map { it.label }, quality.ordinal) { i ->
+            applyChoice(all[i], audioMode); dlg.dismiss()
+        })
+    }
+
+    private fun showAudioOutputSheet() = sheet("Audio output") { box, dlg ->
+        val all = AudioMode.values()
+        box.addView(radioGroup(100, all.map { it.label }, audioMode.ordinal) { i ->
+            applyChoice(quality, all[i]); dlg.dismiss()
+        })
+        box.addView(TextView(this).apply {
+            text = "Audio sets the maximum channels; sources with fewer channels are not upmixed."
+            setTextColor(0xFF777777.toInt()); textSize = 11f; setPadding(0, dp(12), 0, 0)
+        })
+    }
+
+    private fun showMoreSheet() = sheet("More") { box, dlg ->
+        fun row(label: String, value: String = "", onClick: () -> Unit) {
+            box.addView(sheetRow(label, value) { dlg.dismiss(); onClick() })
+        }
+        row("Video quality", qualityText()) { showQualitySheet() }
+        row("Audio output", audioMode.label) { showAudioOutputSheet() }
+        row("Aspect ratio", aspectName()) { cycleAspect() }
+        row("Audio only", if (audioOnly) "On" else "Off") { toggleAudioOnly() }
+        row("Repeat", if (loopOne) "On" else "Off") { toggleLoop() }
+        row("Screenshot") { takeScreenshot() }
+        row("Picture-in-picture") { enterPip() }
+        row("Rotate screen") { rotateScreen() }
+        row("Skip +90s") { seekBy(90_000); showHud("+90s") }
+        if (hasPrev) row("Previous episode") { switchTo(siblings[siblingIndex - 1].id) }
+        if (hasNext) row("Next episode") { switchTo(siblings[siblingIndex + 1].id) }
+    }
+
+    private fun qualityText() = if (quality == Quality.ORIGINAL) "Original" else quality.label.substringBefore(' ')
+    private fun speedText(f: Float) = (if (f % 1f == 0f) f.toInt().toString() else f.toString()) + "x"
+
+    // ================================================================= controls visibility
     private fun showControls() {
         if (locked) return
         controlsVisible = true; controls.visibility = View.VISIBLE
@@ -388,10 +493,6 @@ class PlayerActivity : ComponentActivity() {
         seek.secondaryProgress = player.bufferedPosition.toInt().coerceAtLeast(0)
         curTime.text = fmt(player.currentPosition)
         durTime.text = if (dur > 0) fmt(dur) else "--:--"
-    }
-
-    private fun updateNav() {
-        nextBtn.alpha = if (siblingIndex >= 0 && siblingIndex < siblings.size - 1) 1f else 0.35f
     }
 
     // ================================================================= playback
@@ -418,8 +519,7 @@ class PlayerActivity : ComponentActivity() {
                 spinner.visibility = if (state == Player.STATE_BUFFERING) View.VISIBLE else View.GONE
                 if (state == Player.STATE_READY) updateProgress()
                 if (state == Player.STATE_ENDED) {
-                    if (siblingIndex >= 0 && siblingIndex < siblings.size - 1) switchTo(siblings[siblingIndex + 1].id)
-                    else finish()
+                    if (autoPlayNext && hasNext) switchTo(siblings[siblingIndex + 1].id) else finish()
                 }
             }
             override fun onPlayerError(error: PlaybackException) {
@@ -433,6 +533,12 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun loadAndPlay() = lifecycleScope.launch {
+        val file = offlinePath
+        if (file != null) {
+            player.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(file))))
+            player.prepare(); player.playWhenReady = true
+            return@launch
+        }
         try {
             val item = Api.item(itemId)
             val src = item.mediaSources?.firstOrNull() ?: error("No media source")
@@ -452,14 +558,12 @@ class PlayerActivity : ComponentActivity() {
             report("start")
             handler.postDelayed(progressTick, 10_000)
 
-            // previous/next episode list
             siblings = emptyList(); siblingIndex = -1
             if (item.type == "Episode" && item.parentId != null) {
                 siblings = runCatching { Api.children(item.parentId) }.getOrDefault(emptyList())
                     .filter { it.type == "Episode" }
                 siblingIndex = siblings.indexOfFirst { it.id == itemId }
             }
-            updateNav()
         } catch (e: Exception) { showHud("Error: ${e.message}", 4000) }
     }
 
@@ -472,10 +576,17 @@ class PlayerActivity : ComponentActivity() {
         loadAndPlay()
     }
 
+    private fun applyChoice(nq: Quality, na: AudioMode) {
+        if (nq == quality && na == audioMode) return
+        quality = nq; audioMode = na
+        getSharedPreferences("player", MODE_PRIVATE).edit()
+            .putString("quality", quality.name).putString("audio", audioMode.name).apply()
+        applyPlayback()
+    }
+
     private fun applyPlayback() {
         if (sourceId.isEmpty()) return
         val pos = player.currentPosition
-        qualityLabel.text = qualityText()
         showHud("Switching to ${quality.label} · Audio: ${audioMode.label}…", 2500)
         lifecycleScope.launch {
             val mi = buildMediaItem()
@@ -484,92 +595,18 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    // ================================================================= dialogs
-    private fun dialog() = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-
-    private fun showPlaybackSettings(showVideo: Boolean, showAudio: Boolean) {
-        val pad = dp(16)
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad / 2, pad, 0) }
-        fun header(t: String) = TextView(this).apply {
-            text = t; setTextColor(accent); textSize = 14f; setPadding(0, pad / 2, 0, pad / 4)
-        }
-        val qGroup = if (showVideo) RadioGroup(this).apply {
-            Quality.values().forEachIndexed { i, q -> addView(RadioButton(context).apply { id = 1000 + i; text = q.label }) }
-            check(1000 + quality.ordinal)
-        } else null
-        val aGroup = if (showAudio) RadioGroup(this).apply {
-            AudioMode.values().forEachIndexed { i, a -> addView(RadioButton(context).apply { id = 2000 + i; text = a.label }) }
-            check(2000 + audioMode.ordinal)
-        } else null
-        if (qGroup != null) { box.addView(header("VIDEO QUALITY")); box.addView(qGroup) }
-        if (aGroup != null) { box.addView(header("AUDIO OUTPUT")); box.addView(aGroup) }
-        box.addView(TextView(this).apply {
-            text = "Quality and audio changes use server transcoding. Audio sets the maximum channels; " +
-                "sources with fewer channels are not upmixed. Original = direct play."
-            textSize = 11f; setTextColor(0xFF999999.toInt()); setPadding(0, pad / 2, 0, pad / 2)
-        })
-        dialog().setTitle("Playback settings")
-            .setView(ScrollView(this).apply { addView(box) })
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Apply") { _, _ ->
-                val nq = qGroup?.let { Quality.values().getOrElse(it.checkedRadioButtonId - 1000) { quality } } ?: quality
-                val na = aGroup?.let { AudioMode.values().getOrElse(it.checkedRadioButtonId - 2000) { audioMode } } ?: audioMode
-                if (nq != quality || na != audioMode) {
-                    quality = nq; audioMode = na
-                    getSharedPreferences("player", MODE_PRIVATE).edit()
-                        .putString("quality", quality.name).putString("audio", audioMode.name).apply()
-                    applyPlayback()
-                }
-            }.show()
-    }
-
-    private fun showSpeedDialog() {
-        val opts = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
-        dialog().setTitle("Playback speed")
-            .setSingleChoiceItems(opts.map { speedText(it) }.toTypedArray(), opts.indexOfFirst { it == speed }.coerceAtLeast(0)) { d, which ->
-                speed = opts[which]; player.setPlaybackSpeed(speed)
-                speedBtn.text = speedText(speed); d.dismiss()
-            }.show()
-    }
-
-    private fun showTrackDialog(type: Int, title: String) {
-        val groups = player.currentTracks.groups.filter { it.type == type && it.isSupported }
-        val isText = type == C.TRACK_TYPE_TEXT
-        if (groups.isEmpty()) {
-            showHud(if (isText) "No subtitles" else "No other audio tracks" + if (isTranscoding) " (transcoding)" else "")
-            return
-        }
-        val labels = ArrayList<String>()
-        if (isText) labels.add("Off")
-        groups.forEachIndexed { i, g ->
-            val f = g.getTrackFormat(0)
-            val lang = f.language?.let { Locale(it).displayLanguage }?.takeIf { it.isNotBlank() }
-            labels.add(listOfNotNull(f.label, lang).distinct().joinToString(" · ").ifEmpty { "Track ${i + 1}" })
-        }
-        val textOff = player.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
-        val sel = groups.indexOfFirst { it.isSelected }
-        val checked = if (isText) (if (textOff || sel < 0) 0 else sel + 1) else maxOf(sel, 0)
-        dialog().setTitle(title)
-            .setSingleChoiceItems(labels.toTypedArray(), checked) { d, which ->
-                val b = player.trackSelectionParameters.buildUpon()
-                if (isText) {
-                    if (which == 0) b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                    else b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                        .setOverrideForType(TrackSelectionOverride(groups[which - 1].mediaTrackGroup, 0))
-                } else {
-                    b.setOverrideForType(TrackSelectionOverride(groups[which].mediaTrackGroup, 0))
-                }
-                player.trackSelectionParameters = b.build(); d.dismiss()
-            }.show()
-    }
-
-    // ================================================================= buttons
+    // ================================================================= misc buttons
     private fun toggleAudioOnly() {
         audioOnly = !audioOnly
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly).build()
-        phonesBtn.setColorFilter(if (audioOnly) accent else Color.WHITE)
         showHud(if (audioOnly) "Audio only" else "Video on")
+    }
+
+    private fun toggleLoop() {
+        loopOne = !loopOne
+        player.repeatMode = if (loopOne) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+        showHud(if (loopOne) "Repeat: on" else "Repeat: off")
     }
 
     private fun rotateScreen() {
@@ -578,12 +615,21 @@ class PlayerActivity : ComponentActivity() {
         else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
     }
 
+    private val resizeModes = intArrayOf(
+        AspectRatioFrameLayout.RESIZE_MODE_FIT, AspectRatioFrameLayout.RESIZE_MODE_FILL,
+        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+    )
+    private val resizeNames = arrayOf("Fit", "Stretch", "Crop")
+
+    private fun aspectName(): String {
+        val i = resizeModes.indexOfFirst { it == playerView.resizeMode }
+        return resizeNames[if (i < 0) 0 else i]
+    }
+
     private fun cycleAspect() {
-        val modes = intArrayOf(AspectRatioFrameLayout.RESIZE_MODE_FIT, AspectRatioFrameLayout.RESIZE_MODE_FILL,
-            AspectRatioFrameLayout.RESIZE_MODE_ZOOM)
-        val names = arrayOf("Fit", "Stretch", "Crop")
-        val n = (modes.indexOfFirst { it == playerView.resizeMode } + 1) % modes.size
-        playerView.resizeMode = modes[n]; showHud(names[n])
+        val i = resizeModes.indexOfFirst { it == playerView.resizeMode }
+        val n = (i + 1) % resizeModes.size
+        playerView.resizeMode = resizeModes[n]; showHud(resizeNames[n])
     }
 
     private fun enterPip() {
@@ -650,8 +696,8 @@ class PlayerActivity : ComponentActivity() {
                 if (locked) return true
                 val w = playerView.width
                 when {
-                    e.x < w / 3f -> { seekBy(-10_000); showHud("⏪ -10s") }
-                    e.x > w * 2 / 3f -> { seekBy(10_000); showHud("+10s ⏩") }
+                    e.x < w / 3f -> { seekBy(-10_000); showHud("-10s") }
+                    e.x > w * 2 / 3f -> { seekBy(10_000); showHud("+10s") }
                     else -> if (player.isPlaying) player.pause() else player.play()
                 }
                 return true
@@ -659,7 +705,7 @@ class PlayerActivity : ComponentActivity() {
 
             override fun onLongPress(e: MotionEvent) {
                 if (locked) return
-                longPressing = true; player.setPlaybackSpeed(2f); showHud("2×", 100_000)
+                longPressing = true; player.setPlaybackSpeed(2f); showHud("2x", 100_000)
             }
 
             override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
@@ -684,13 +730,13 @@ class PlayerActivity : ComponentActivity() {
                     Mode.BRIGHT -> {
                         brightness = (brightness + dy / playerView.height).coerceIn(0.01f, 1f)
                         window.attributes = window.attributes.also { it.screenBrightness = brightness }
-                        showHud("☀ ${(brightness * 100).toInt()}%")
+                        showHud("Brightness ${(brightness * 100).toInt()}%")
                     }
                     Mode.VOLUME -> {
                         val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                         volF = (volF + dy / playerView.height * max * 1.5f).coerceIn(0f, max.toFloat())
                         audio.setStreamVolume(AudioManager.STREAM_MUSIC, volF.toInt(), 0)
-                        showHud("🔊 ${(volF / max * 100).toInt()}%")
+                        showHud("Volume ${(volF / max * 100).toInt()}%")
                     }
                     else -> {}
                 }
@@ -718,7 +764,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun fmt(ms: Long): String {
-        val s = (ms.coerceAtLeast(0L)) / 1000
+        val s = ms.coerceAtLeast(0L) / 1000
         return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s % 3600 / 60, s % 60)
         else "%02d:%02d".format(s / 60, s % 60)
     }
@@ -748,6 +794,7 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        if (!::player.isInitialized) { super.onDestroy(); return }
         if (sourceId.isNotEmpty()) {
             val pos = player.currentPosition; val id = itemId; val src = sourceId
             val tc = isTranscoding; val sid = sessionId

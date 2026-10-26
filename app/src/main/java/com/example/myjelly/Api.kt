@@ -9,6 +9,7 @@ import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import okhttp3.MediaType.Companion.toMediaType
+import java.net.URLEncoder
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -133,11 +134,35 @@ object Api {
 
     /** Random movies/series that have backdrops, for the home carousel. */
     suspend fun featured(): List<Item> = json.decodeFromString<ItemsResult>(
-        call("GET", "/Items?userId=$userId&recursive=true&includeItemTypes=Movie,Series&imageTypes=Backdrop&sortBy=Random&limit=7&fields=Overview")
+        call("GET", "/Items?userId=$userId&recursive=true&includeItemTypes=Movie,Series&imageTypes=Backdrop&sortBy=Random&limit=7&fields=Overview,Genres")
+    ).items
+
+    suspend fun trending(): List<Item> = json.decodeFromString<ItemsResult>(
+        call("GET", "/Items?userId=$userId&recursive=true&includeItemTypes=Movie,Series&sortBy=DateCreated&sortOrder=Descending&limit=20&fields=Overview,Genres")
+    ).items
+
+    suspend fun byType(type: String): List<Item> = json.decodeFromString<ItemsResult>(
+        call("GET", "/Items?userId=$userId&recursive=true&includeItemTypes=$type&sortBy=SortName&limit=500")
+    ).items
+
+    suspend fun favorites(): List<Item> = json.decodeFromString<ItemsResult>(
+        call("GET", "/Items?userId=$userId&recursive=true&isFavorite=true&includeItemTypes=Movie,Series,Episode&sortBy=SortName")
+    ).items
+
+    suspend fun setFavorite(id: String, favorite: Boolean) {
+        call(if (favorite) "POST" else "DELETE", "/Users/$userId/FavoriteItems/$id")
+    }
+
+    suspend fun similar(id: String): List<Item> = json.decodeFromString<ItemsResult>(
+        call("GET", "/Items/$id/Similar?userId=$userId&limit=12")
+    ).items
+
+    suspend fun search(q: String): List<Item> = json.decodeFromString<ItemsResult>(
+        call("GET", "/Items?userId=$userId&searchTerm=${URLEncoder.encode(q, "UTF-8")}&recursive=true&includeItemTypes=Movie,Series,Episode&limit=40")
     ).items
 
     suspend fun latest(parentId: String): List<Item> = json.decodeFromString<List<Item>>(
-        call("GET", "/Users/$userId/Items/Latest?parentId=$parentId&limit=16&fields=Overview"))
+        call("GET", "/Users/$userId/Items/Latest?parentId=$parentId&limit=16&fields=Overview,Genres"))
 
     suspend fun children(parentId: String): List<Item> = json.decodeFromString<ItemsResult>(
         call("GET", "/Items?userId=$userId&parentId=$parentId&sortBy=ParentIndexNumber,IndexNumber,SortName&fields=Overview")
