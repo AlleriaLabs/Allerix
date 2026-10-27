@@ -191,7 +191,9 @@ object Api {
     }
 
     // ---- images ----
-    fun poster(i: Item) = "$base/Items/${i.id}/Images/Primary?maxHeight=500&quality=90"
+    fun poster(i: Item): String =
+        if (i.type == "Episode" && i.seriesId != null) "$base/Items/${i.seriesId}/Images/Primary?maxHeight=500&quality=90"
+        else "$base/Items/${i.id}/Images/Primary?maxHeight=500&quality=90"
     fun heroImage(i: Item): String =
         if (i.type == "Episode" && i.seriesId != null) "$base/Items/${i.seriesId}/Images/Primary?maxHeight=900&quality=90"
         else "$base/Items/${i.id}/Images/Primary?maxHeight=900&quality=90"
@@ -302,8 +304,22 @@ object Api {
         return TranscodeInfo(hlsUrl(id, sourceId, q, a, fallbackSession), fallbackSession)
     }
 
-    fun subtitleUrl(id: String, sourceId: String, index: Int) =
-        "$base/Videos/$id/$sourceId/Subtitles/$index/Stream.srt?api_key=$token"
+    fun subtitleUrl(id: String, sourceId: String, index: Int, ext: String = "srt") =
+        "$base/Videos/$id/$sourceId/Subtitles/$index/Stream.$ext?api_key=$token"
+
+    suspend fun fetchBytes(url: String): ByteArray = withContext(Dispatchers.IO) {
+        val req = Request.Builder().url(url).build()
+        http.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) error("HTTP ${r.code}")
+            r.body?.bytes() ?: ByteArray(0)
+        }
+    }
+
+    /** UTF-8 first; falls back to Windows-1252 for old Latin subtitle files. */
+    fun decodeText(b: ByteArray): String {
+        val s = String(b, Charsets.UTF_8)
+        return if (s.count { it == '\uFFFD' } > 3) String(b, java.nio.charset.Charset.forName("windows-1252")) else s
+    }
 
     /** kind: "start" | "progress" | "stop" */
     suspend fun report(kind: String, itemId: String, sourceId: String, posMs: Long, paused: Boolean,

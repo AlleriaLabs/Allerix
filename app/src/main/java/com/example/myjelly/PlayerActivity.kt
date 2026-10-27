@@ -1,10 +1,10 @@
 package com.example.myjelly
 
-import android.app.AlertDialog
 import android.app.Dialog
 import android.app.PictureInPictureParams
 import android.content.ContentValues
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
 import android.content.res.Configuration
@@ -14,12 +14,14 @@ import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
+import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.text.SpannableString
 import android.text.Spanned
@@ -43,6 +45,7 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.annotation.RequiresApi
 import androidx.core.view.WindowCompat
@@ -60,19 +63,23 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.abs
+import kotlin.math.log10
 
 /**
- * Player styled after the Alleria mockup: top bar, big centre controls (10s back / play / 10s forward),
- * red seek bar, and a glass panel with Lock, Audio & Subtitles, Playback Speed and More.
+ * Alleria player: floating glass control card, selectable decoder (HW / HW+ / SW), 4K/8K direct play,
+ * custom subtitle engine (srt, ass/ssa, vtt, text sub) with style, sync and swipe gestures,
+ * and software volume boost up to 200%.
  */
 @OptIn(UnstableApi::class)
 class PlayerActivity : ComponentActivity() {
@@ -80,32 +87,56 @@ class PlayerActivity : ComponentActivity() {
 
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
+    private lateinit var root: FrameLayout
     private lateinit var hud: TextView
     private lateinit var spinner: ProgressBar
     private lateinit var controls: FrameLayout
     private lateinit var lockOverlay: ImageView
     private lateinit var titleView: TextView
+    private lateinit var subTitle: TextView
+    private lateinit var badgeRow: LinearLayout
     private lateinit var seek: SeekBar
     private lateinit var curTime: TextView
     private lateinit var durTime: TextView
-    private lateinit var subTitle: TextView
-    private lateinit var volSeek: SeekBar
-    private lateinit var badgeRow: LinearLayout
-    private var nowTag = ""
-    private var lastVolume = 0
     private lateinit var playBtn: ImageView
+    private lateinit var subText: TextView
+    private lateinit var speedLabel: TextView
+    private lateinit var decoderLabel: TextView
+    private lateinit var volLabel: TextView
     private lateinit var audio: AudioManager
+    private lateinit var prefs: SharedPreferences
     private val handler = Handler(Looper.getMainLooper())
 
     private var itemId = ""
     private var offlinePath: String? = null
     private var sourceId = ""
     private var sessionId = UUID.randomUUID().toString().replace("-", "")
-    private var subs: List<MediaItem.SubtitleConfiguration> = emptyList()
     private var quality = Quality.ORIGINAL
     private var audioMode = AudioMode.ORIGINAL
+    private var decoder = DecoderMode.HW
     private var siblings: List<Item> = emptyList()
     private var siblingIndex = -1
+
+    // subtitles (own engine)
+    private var subStreams: List<MediaStream> = emptyList()
+    private var cues: List<SubCue> = emptyList()
+    private var subOn = false
+    private var activeSub = -1          // index in subStreams, -2 = loaded from file, -1 = none
+    private var subDelayMs = 0L
+    private var subPos = 0.12f          // bottom offset as a fraction of screen height
+    private var nativeOn = false        // an image-based (PGS/DVB) track is shown by ExoPlayer
+    private var shownText = ""
+    private var previewUntil = 0L
+    private var subDrag = false
+    private var subMode = 0             // 0 undecided, 1 reposition, 2 jump
+    private var subDownX = 0f
+    private var subDownY = 0f
+    private var subStartPos = 0f
+
+    // volume boost
+    private var enhancer: LoudnessEnhancer? = null
+    private var boostPct = 100
+    private var lastVolume = 0
 
     private var locked = false
     private var longPressing = false
@@ -115,6 +146,7 @@ class PlayerActivity : ComponentActivity() {
     private var loopOne = false
     private var autoPlayNext = true
     private var speed = 1f
+    private var nowTag = ""
 
     private enum class Mode { NONE, SEEK, BRIGHT, VOLUME }
     private var mode = Mode.NONE
@@ -122,6 +154,10 @@ class PlayerActivity : ComponentActivity() {
     private var seekTarget = 0L
     private var brightness = 0.5f
     private var volF = 0f
+
+    private val subFilePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) loadSubtitleFile(uri)
+    }
 
     private val isTranscoding get() = offlinePath == null && (quality != Quality.ORIGINAL || audioMode != AudioMode.ORIGINAL)
     private val hasNext get() = siblingIndex >= 0 && siblingIndex < siblings.size - 1
@@ -139,6 +175,9 @@ class PlayerActivity : ComponentActivity() {
             handler.postDelayed(this, 500)
         }
     }
+    private val subTick = object : Runnable {
+        override fun run() { updateSubtitle(); handler.postDelayed(this, 100) }
+    }
 
     // ================================================================= lifecycle
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -147,14 +186,16 @@ class PlayerActivity : ComponentActivity() {
         itemId = intent.getStringExtra("id") ?: return finish()
         offlinePath = intent.getStringExtra("file")
         audio = getSystemService(AUDIO_SERVICE) as AudioManager
-
-        val prefs = getSharedPreferences("player", MODE_PRIVATE)
+        prefs = getSharedPreferences("player", MODE_PRIVATE)
         quality = runCatching { Quality.valueOf(prefs.getString("quality", "ORIGINAL") ?: "ORIGINAL") }
             .getOrDefault(Quality.ORIGINAL)
         audioMode = runCatching { AudioMode.valueOf(prefs.getString("audio", "ORIGINAL") ?: "ORIGINAL") }
             .getOrDefault(AudioMode.ORIGINAL)
+        decoder = runCatching { DecoderMode.valueOf(prefs.getString("decoder", "HW") ?: "HW") }
+            .getOrDefault(DecoderMode.HW)
         speed = prefs.getFloat("speed", 1f)
         autoPlayNext = prefs.getBoolean("autoplay", true)
+        subPos = prefs.getFloat("sub_pos", 0.12f)
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -163,13 +204,7 @@ class PlayerActivity : ComponentActivity() {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
 
-        player = ExoPlayer.Builder(
-            this,
-            DefaultRenderersFactory(this)
-                .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
-        ).setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000).build()
-        player.setPlaybackSpeed(speed)
-
+        player = createPlayer()
         playerView = PlayerView(this).apply {
             player = this@PlayerActivity.player
             useController = false
@@ -179,24 +214,84 @@ class PlayerActivity : ComponentActivity() {
         setupGestures()
         attachPlayerListener()
         handler.post(uiTick)
+        handler.post(subTick)
         showControls()
         loadAndPlay()
+    }
+
+    /** Builds an ExoPlayer using the chosen decoder mode. 4K/8K play whenever the device decoder supports them. */
+    private fun createPlayer(): ExoPlayer {
+        val selector = MediaCodecSelector { mime, secure, tunneling ->
+            val all = MediaCodecSelector.DEFAULT.getDecoderInfos(mime, secure, tunneling)
+            when (decoder) {
+                DecoderMode.SW -> all.filter { it.softwareOnly }.ifEmpty { all }
+                DecoderMode.HW -> all.filter { it.hardwareAccelerated }.ifEmpty { all }
+                DecoderMode.HW_PLUS -> all
+            }
+        }
+        val factory = DefaultRenderersFactory(this)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setMediaCodecSelector(selector)
+            .setEnableDecoderFallback(true)
+        if (decoder == DecoderMode.HW_PLUS) factory.forceEnableMediaCodecAsynchronousQueueing()
+        val p = ExoPlayer.Builder(this, factory)
+            .setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000).build()
+        p.setPlaybackSpeed(speed)
+        // subtitles are drawn by our own engine; ExoPlayer's text renderer is only used for image subtitles
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+        return p
+    }
+
+    private fun changeDecoder(mode: DecoderMode) {
+        if (mode == decoder) return
+        decoder = mode
+        prefs.edit().putString("decoder", mode.name).apply()
+        decoderLabel.text = mode.label
+        val pos = player.currentPosition
+        val wasPlaying = player.playWhenReady
+        player.release()
+        player = createPlayer()
+        playerView.player = player
+        attachPlayerListener()
+        if (loopOne) player.repeatMode = Player.REPEAT_MODE_ONE
+        if (audioOnly) player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true).build()
+        nativeOn = false
+        val file = offlinePath
+        if (file != null) {
+            player.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(file))), pos)
+            player.prepare(); player.playWhenReady = wasPlaying
+        } else if (sourceId.isNotEmpty()) {
+            lifecycleScope.launch {
+                player.setMediaItem(buildMediaItem(), pos)
+                player.prepare(); player.playWhenReady = wasPlaying
+            }
+        }
+        showHud("Decoder: ${mode.label}", 1500)
     }
 
     // ================================================================= UI building
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private fun circleBg() = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x99181E30.toInt()) }
+    private fun circleBg(color: Int = 0x99181E30.toInt(), stroke: Int = 0) = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL; setColor(color)
+        if (stroke != 0) setStroke(dp(2), stroke)
+    }
 
-    private fun icon(res: Int, size: Int = 48, pad: Int = 12) = ImageView(this).apply {
+    private fun icon(res: Int, size: Int = 44, pad: Int = 10) = ImageView(this).apply {
         setImageResource(res); setColorFilter(Color.WHITE)
         setPadding(dp(pad), dp(pad), dp(pad), dp(pad))
         layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
     }
 
-    /** 10-second skip button: a circular arrow with "10" in the middle. */
+    private fun glassIcon(res: Int, size: Int = 44, pad: Int = 11) =
+        icon(res, size, pad).apply { background = circleBg() }
+
+    /** 10-second skip button: a circular arrow with "10" in the middle, on a glass disc. */
     private fun skipButton(forward: Boolean): FrameLayout = FrameLayout(this).apply {
-        layoutParams = LinearLayout.LayoutParams(dp(58), dp(58))
+        background = circleBg()
+        setPadding(dp(10), dp(10), dp(10), dp(10))
         addView(ImageView(context).apply {
             setImageResource(R.drawable.ic_replay); setColorFilter(Color.WHITE)
             scaleX = if (forward) -1f else 1f
@@ -205,6 +300,19 @@ class PlayerActivity : ComponentActivity() {
             text = "10"; setTextColor(Color.WHITE); textSize = 12f
             setTypeface(typeface, Typeface.BOLD); gravity = Gravity.CENTER
         }, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+    }
+
+    /** Icon with a small label underneath; one entry in the bottom glass card. */
+    private fun action(res: Int, label: String): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+        setPadding(0, dp(8), 0, dp(2))
+        layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        addView(ImageView(context).apply { setImageResource(res); setColorFilter(Color.WHITE) },
+            LinearLayout.LayoutParams(dp(24), dp(24)))
+        addView(TextView(context).apply {
+            text = label; setTextColor(0xFFD0D0D6.toInt()); textSize = 10f
+            gravity = Gravity.CENTER; maxLines = 1; setPadding(0, dp(3), 0, 0)
+        })
     }
 
     private fun badge(text: String, filled: Boolean): TextView = TextView(this).apply {
@@ -224,45 +332,45 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun buildUi() {
-        // ---- top bar: back, title + "Now Playing", cast, picture-in-picture, more
-        val backBtn = icon(R.drawable.ic_back)
+        // ---- top bar
+        val backBtn = glassIcon(R.drawable.ic_back)
         titleView = TextView(this).apply {
             text = intent.getStringExtra("title") ?: ""
-            setTextColor(Color.WHITE); textSize = 18f; setTypeface(typeface, Typeface.BOLD)
+            setTextColor(Color.WHITE); textSize = 19f; setTypeface(typeface, Typeface.BOLD)
             maxLines = 1; ellipsize = TextUtils.TruncateAt.END
         }
-        subTitle = TextView(this).apply {
-            textSize = 12f; setTextColor(0xFFCCCCCC.toInt()); text = nowPlayingText(true)
-        }
+        subTitle = TextView(this).apply { textSize = 12f; setTextColor(0xFFCCCCCC.toInt()); text = nowPlayingText(true) }
         val titleCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(dp(4), 0, dp(8), 0)
+            orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, dp(8), 0)
             addView(titleView); addView(subTitle)
+        }
+        badgeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; visibility = View.GONE
+            setPadding(0, 0, dp(6), 0)
         }
         val castBtn = icon(R.drawable.ic_cast)
         val pipBtn = icon(R.drawable.ic_pip)
-        val moreTop = icon(R.drawable.ic_more)
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(6), dp(8), dp(18))
+            setPadding(dp(12), dp(10), dp(8), dp(22))
             background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xCC000000.toInt(), 0))
             addView(backBtn)
             addView(titleCol, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(castBtn); addView(pipBtn); addView(moreTop)
+            addView(badgeRow); addView(castBtn); addView(pipBtn)
         }
-        badgeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; visibility = View.GONE }
 
-        // ---- centre controls (wide spacing)
+        // ---- centre: skip back, big play (red ring), skip forward
         val rewBtn = skipButton(false)
-        playBtn = icon(R.drawable.ic_pause, 76, 14)
+        playBtn = icon(R.drawable.ic_pause, 88, 22).apply { background = circleBg(0xB3000000.toInt(), accent) }
         val fwdBtn = skipButton(true)
         val center = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(rewBtn, LinearLayout.LayoutParams(dp(58), dp(58)).apply { rightMargin = dp(64) })
-            addView(playBtn, LinearLayout.LayoutParams(dp(76), dp(76)))
-            addView(fwdBtn, LinearLayout.LayoutParams(dp(58), dp(58)).apply { leftMargin = dp(64) })
+            addView(rewBtn, LinearLayout.LayoutParams(dp(64), dp(64)).apply { rightMargin = dp(48) })
+            addView(playBtn, LinearLayout.LayoutParams(dp(88), dp(88)))
+            addView(fwdBtn, LinearLayout.LayoutParams(dp(64), dp(64)).apply { leftMargin = dp(48) })
         }
 
-        // ---- time | seek bar | duration
+        // ---- bottom glass card: seek row + action row
         curTime = TextView(this).apply {
             text = "00:00"; setTextColor(Color.WHITE); textSize = 13f; minWidth = dp(52); gravity = Gravity.CENTER
         }
@@ -286,63 +394,41 @@ class PlayerActivity : ComponentActivity() {
         })
         val seekRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), 0, dp(12), 0)
             addView(curTime)
-            addView(seek, LinearLayout.LayoutParams(0, dp(32), 1f))
+            addView(seek, LinearLayout.LayoutParams(0, dp(30), 1f))
             addView(durTime)
         }
-
-        // ---- bottom icon row: lock, tracks, volume | subtitles, settings, aspect
-        val lockBtn = icon(R.drawable.ic_lock_open, 44, 10)
-        val tracksBtn = icon(R.drawable.ic_comment, 44, 10)
-        val volIcon = icon(R.drawable.ic_volume, 44, 10)
-        volSeek = SeekBar(this).apply {
-            max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-            progress = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
-            progressTintList = ColorStateList.valueOf(accent)
-            thumbTintList = ColorStateList.valueOf(Color.WHITE)
-            progressBackgroundTintList = ColorStateList.valueOf(0x55FFFFFF)
+        val lockItem = action(R.drawable.ic_lock_open, "Lock")
+        val subsItem = action(R.drawable.ic_subtitles, "Subtitles")
+        val audioItem = action(R.drawable.ic_music, "Audio")
+        val speedItem = action(R.drawable.ic_schedule, speedText(speed))
+        val decoderItem = action(R.drawable.ic_memory, decoder.label)
+        val volItem = action(R.drawable.ic_volume, "100%")
+        val moreItem = action(R.drawable.ic_more_horiz, "More")
+        speedLabel = speedItem.getChildAt(1) as TextView
+        decoderLabel = decoderItem.getChildAt(1) as TextView
+        volLabel = volItem.getChildAt(1) as TextView
+        val actionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(lockItem); addView(subsItem); addView(audioItem); addView(speedItem)
+            addView(decoderItem); addView(volItem); addView(moreItem)
         }
-        volSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
-                if (fromUser) audio.setStreamVolume(AudioManager.STREAM_MUSIC, p, 0)
-            }
-            override fun onStartTrackingTouch(s: SeekBar) { handler.removeCallbacks(autoHide) }
-            override fun onStopTrackingTouch(s: SeekBar) { scheduleHide() }
-        })
-        val ccBtn = icon(R.drawable.ic_subtitles, 44, 10)
-        val gearBtn = icon(R.drawable.ic_settings, 44, 10)
-        val fullBtn = icon(R.drawable.ic_fullscreen, 44, 10)
-        val leftGroup = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(lockBtn); addView(tracksBtn); addView(volIcon)
-            addView(volSeek, LinearLayout.LayoutParams(dp(96), dp(30)))
-        }
-        val rightGroup = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(ccBtn); addView(gearBtn); addView(fullBtn)
-        }
-        val iconRow = FrameLayout(this).apply {
-            setPadding(dp(8), 0, dp(8), dp(4))
-            addView(leftGroup, FrameLayout.LayoutParams(-2, -2, Gravity.START or Gravity.CENTER_VERTICAL))
-            addView(rightGroup, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL))
-        }
-        val bottomBar = LinearLayout(this).apply {
+        val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(28), 0, dp(4))
-            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0, 0xDD000000.toInt()))
-            addView(seekRow)
-            addView(iconRow)
+            setPadding(dp(14), dp(10), dp(14), dp(6))
+            background = GradientDrawable().apply {
+                setColor(0xCC121216.toInt()); cornerRadius = dp(24).toFloat(); setStroke(dp(1), 0x26FFFFFF)
+            }
+            addView(seekRow); addView(actionRow)
         }
 
         controls = FrameLayout(this).apply {
             addView(topBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
-            addView(badgeRow, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END)
-                .apply { topMargin = dp(66); rightMargin = dp(16) })
             addView(center, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
-            addView(bottomBar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+            addView(card, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { setMargins(dp(16), 0, dp(16), dp(14)) })
         }
 
+        subText = TextView(this).apply { gravity = Gravity.CENTER; visibility = View.GONE }
         hud = TextView(this).apply {
             setTextColor(Color.WHITE); textSize = 20f; setPadding(40, 24, 40, 24)
             setBackgroundColor(0x99000000.toInt()); visibility = View.GONE
@@ -354,9 +440,10 @@ class PlayerActivity : ComponentActivity() {
             setImageResource(R.drawable.ic_lock); setColorFilter(Color.WHITE)
             setPadding(dp(12), dp(12), dp(12), dp(12)); background = circleBg(); visibility = View.GONE
         }
-        val root = FrameLayout(this).apply {
+        root = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             addView(playerView, FrameLayout.LayoutParams(-1, -1))
+            addView(subText, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
             addView(spinner, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER))
             addView(controls, FrameLayout.LayoutParams(-1, -1))
             addView(hud, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
@@ -364,60 +451,28 @@ class PlayerActivity : ComponentActivity() {
                 .apply { leftMargin = dp(32); bottomMargin = dp(32) })
         }
         setContentView(root)
+        applySubStyle()
+        layoutSubtitle()
 
-        // ---- actions
         act(backBtn) { finish() }
         act(castBtn) { openCast() }
         act(pipBtn) { enterPip() }
-        act(moreTop) { showMoreSheet() }
         act(rewBtn) { seekBy(-10_000); showHud("-10s") }
         act(fwdBtn) { seekBy(10_000); showHud("+10s") }
         act(playBtn) { if (player.isPlaying) player.pause() else player.play() }
-        act(lockBtn) { toggleLock() }
-        act(tracksBtn) { showAudioSubsSheet() }
-        act(volIcon) { toggleMute() }
-        act(ccBtn) { toggleSubtitles() }
-        act(gearBtn) { showSettingsSheet() }
-        act(fullBtn) { cycleAspect() }
+        act(lockItem) { toggleLock() }
+        act(subsItem) { showSubtitleSheet() }
+        act(audioItem) { showAudioSheet() }
+        act(speedItem) { showSpeedSheet() }
+        act(decoderItem) { showDecoderSheet() }
+        act(volItem) { showVolumeSheet() }
+        act(moreItem) { showMoreSheet() }
         lockOverlay.setOnClickListener { toggleLock() }
-    }
-
-    private fun openCast() {
-        try { startActivity(Intent(Settings.ACTION_CAST_SETTINGS)) }
-        catch (e: Exception) { showHud("Casting isn't available on this device") }
-    }
-
-    private fun toggleMute() {
-        val cur = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
-        if (cur > 0) {
-            lastVolume = cur
-            audio.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0); volSeek.progress = 0; showHud("Muted")
-        } else {
-            val v = if (lastVolume > 0) lastVolume else audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC) / 2
-            audio.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0); volSeek.progress = v; showHud("Volume on")
-        }
-    }
-
-    private fun toggleSubtitles() {
-        val groups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
-        if (groups.isEmpty()) { showHud("No subtitles"); return }
-        val off = player.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT) ||
-            groups.none { it.isSelected }
-        val b = player.trackSelectionParameters.buildUpon()
-        if (off) {
-            b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                .setOverrideForType(TrackSelectionOverride(groups[0].mediaTrackGroup, 0))
-            showHud("Subtitles on")
-        } else {
-            b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-            showHud("Subtitles off")
-        }
-        player.trackSelectionParameters = b.build()
     }
 
     private fun act(v: View, f: () -> Unit) = v.setOnClickListener { scheduleHide(); f() }
 
-    // ---- bottom sheets (dark glass, rounded top corners)
+    // ================================================================= bottom sheets
     private fun sheet(title: String, content: (LinearLayout, Dialog) -> Unit) {
         val d = Dialog(this, android.R.style.Theme_Material_Dialog_NoActionBar)
         val r = dp(22).toFloat()
@@ -454,6 +509,10 @@ class PlayerActivity : ComponentActivity() {
         setTypeface(typeface, Typeface.BOLD); setPadding(0, dp(16), 0, dp(4))
     }
 
+    private fun noteText(text: String) = TextView(this).apply {
+        this.text = text; setTextColor(0xFF77777D.toInt()); textSize = 11f; setPadding(0, dp(12), 0, 0)
+    }
+
     private fun radioGroup(base: Int, labels: List<String>, checked: Int, onPick: (Int) -> Unit): RadioGroup =
         RadioGroup(this).apply {
             labels.forEachIndexed { i, l ->
@@ -475,50 +534,73 @@ class PlayerActivity : ComponentActivity() {
         setOnClickListener { onClick() }
     }
 
+    private fun pill(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label; setTextColor(Color.WHITE); textSize = 14f; gravity = Gravity.CENTER
+        setPadding(dp(16), dp(10), dp(16), dp(10))
+        background = GradientDrawable().apply { setColor(0xFF2A2A2E.toInt()); cornerRadius = dp(20).toFloat() }
+        setOnClickListener { onClick() }
+    }
+
     private fun trackLabel(g: Tracks.Group, i: Int): String {
         val f = g.getTrackFormat(0)
         val lang = f.language?.let { Locale(it).displayLanguage }?.takeIf { it.isNotBlank() }
         return listOfNotNull(f.label, lang).distinct().joinToString(" · ").ifEmpty { "Track ${i + 1}" }
     }
 
-    private fun showAudioSubsSheet() = sheet("Audio & Subtitles") { box, _ ->
-        val audioGroups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.isSupported }
-        val textGroups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT && it.isSupported }
-        box.addView(sectionLabel("Audio"))
-        if (audioGroups.isEmpty()) {
-            box.addView(TextView(this).apply { text = "No audio tracks"; setTextColor(0xFF9A9AA0.toInt()) })
+    private fun showAudioSheet() = sheet("Audio") { box, _ ->
+        val groups = player.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.isSupported }
+        if (groups.isEmpty()) {
+            box.addView(noteText("No audio tracks found."))
         } else {
-            val labels = audioGroups.mapIndexed { i, g -> trackLabel(g, i) }
-            val sel = audioGroups.indexOfFirst { it.isSelected }.coerceAtLeast(0)
+            val labels = groups.mapIndexed { i, g -> trackLabel(g, i) }
+            val sel = groups.indexOfFirst { it.isSelected }.coerceAtLeast(0)
             box.addView(radioGroup(100, labels, sel) { i ->
                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                    .setOverrideForType(TrackSelectionOverride(audioGroups[i].mediaTrackGroup, 0)).build()
+                    .setOverrideForType(TrackSelectionOverride(groups[i].mediaTrackGroup, 0)).build()
             })
         }
-        box.addView(sectionLabel("Subtitles"))
-        val labels = listOf("Off") + textGroups.mapIndexed { i, g -> trackLabel(g, i) }
-        val textOff = player.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
-        val selText = textGroups.indexOfFirst { it.isSelected }
-        val checked = if (textOff || selText < 0) 0 else selText + 1
-        box.addView(radioGroup(200, labels, checked) { i ->
-            val b = player.trackSelectionParameters.buildUpon()
-            if (i == 0) b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-            else b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                .setOverrideForType(TrackSelectionOverride(textGroups[i - 1].mediaTrackGroup, 0))
-            player.trackSelectionParameters = b.build()
-        })
-        if (isTranscoding) box.addView(TextView(this).apply {
-            text = "While transcoding, only one audio track is available. Choose Original quality and audio to switch tracks."
-            setTextColor(0xFF777777.toInt()); textSize = 11f; setPadding(0, dp(12), 0, 0)
-        })
+        if (isTranscoding) box.addView(noteText(
+            "While transcoding only one audio track is available. Choose Original quality and audio to switch tracks."))
     }
 
     private fun showSpeedSheet() = sheet("Playback Speed") { box, dlg ->
         val speeds = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
-        val labels = speeds.map { speedText(it) }
-        box.addView(radioGroup(100, labels, speeds.indexOfFirst { it == speed }.coerceAtLeast(0)) { i ->
-            speed = speeds[i]; player.setPlaybackSpeed(speed); dlg.dismiss()
+        box.addView(radioGroup(100, speeds.map { speedText(it) }, speeds.indexOfFirst { it == speed }.coerceAtLeast(0)) { i ->
+            speed = speeds[i]; player.setPlaybackSpeed(speed); speedLabel.text = speedText(speed); dlg.dismiss()
         })
+    }
+
+    private fun showDecoderSheet() = sheet("Decoder") { box, dlg ->
+        val all = DecoderMode.values()
+        box.addView(radioGroup(100, all.map { it.label + "  ·  " + it.desc }, decoder.ordinal) { i ->
+            dlg.dismiss(); changeDecoder(all[i])
+        })
+        box.addView(noteText(
+            "HW uses the phone's hardware decoder (best for battery). HW+ also enables asynchronous, multi-threaded " +
+                "decoding for smoother high-bitrate video. SW uses the system software decoder, which Android runs on " +
+                "several CPU cores. 4K and 8K play when your phone's chip supports them."))
+    }
+
+    private fun showVolumeSheet() = sheet("Volume") { box, _ ->
+        val maxV = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val label = TextView(this).apply {
+            text = "${volumePercent()}%"; setTextColor(Color.WHITE); textSize = 30f; gravity = Gravity.CENTER
+            setPadding(0, dp(12), 0, dp(8))
+        }
+        val bar = SeekBar(this).apply {
+            max = 200; progress = volumePercent()
+            progressTintList = ColorStateList.valueOf(accent); thumbTintList = ColorStateList.valueOf(accent)
+            progressBackgroundTintList = ColorStateList.valueOf(0x55FFFFFF)
+        }
+        bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
+                if (fromUser) { setVolumeLevel(p / 100f * maxV); label.text = "$p%" }
+            }
+            override fun onStartTrackingTouch(s: SeekBar) {}
+            override fun onStopTrackingTouch(s: SeekBar) {}
+        })
+        box.addView(label); box.addView(bar)
+        box.addView(noteText("Above 100% the volume is boosted by software, up to 200%. Very loud audio may distort."))
     }
 
     private fun showQualitySheet() = sheet("Video quality") { box, dlg ->
@@ -533,30 +615,23 @@ class PlayerActivity : ComponentActivity() {
         box.addView(radioGroup(100, all.map { it.label }, audioMode.ordinal) { i ->
             applyChoice(quality, all[i]); dlg.dismiss()
         })
-        box.addView(TextView(this).apply {
-            text = "Audio sets the maximum channels; sources with fewer channels are not upmixed."
-            setTextColor(0xFF777777.toInt()); textSize = 11f; setPadding(0, dp(12), 0, 0)
-        })
-    }
-
-    private fun showSettingsSheet() = sheet("Settings") { box, dlg ->
-        fun row(label: String, value: String = "", onClick: () -> Unit) {
-            box.addView(sheetRow(label, value) { dlg.dismiss(); onClick() })
-        }
-        row("Video quality", qualityText()) { showQualitySheet() }
-        row("Audio output", audioMode.label) { showAudioOutputSheet() }
-        row("Playback speed", speedText(speed)) { showSpeedSheet() }
-        row("Aspect ratio", aspectName()) { cycleAspect() }
+        box.addView(noteText("Audio sets the maximum channels; sources with fewer channels are not upmixed."))
     }
 
     private fun showMoreSheet() = sheet("More") { box, dlg ->
         fun row(label: String, value: String = "", onClick: () -> Unit) {
             box.addView(sheetRow(label, value) { dlg.dismiss(); onClick() })
         }
+        row("Video quality", qualityText()) { showQualitySheet() }
+        row("Audio output", audioMode.label) { showAudioOutputSheet() }
+        row("Subtitle style") { showSubtitleStyleSheet() }
+        row("Subtitle sync", delayText()) { showSubtitleSyncSheet() }
+        row("Aspect ratio", aspectName()) { cycleAspect() }
         row("Audio only", if (audioOnly) "On" else "Off") { toggleAudioOnly() }
         row("Repeat", if (loopOne) "On" else "Off") { toggleLoop() }
         row("Screenshot") { takeScreenshot() }
         row("Picture-in-picture") { enterPip() }
+        row("Cast screen") { openCast() }
         row("Rotate screen") { rotateScreen() }
         row("Skip +90s") { seekBy(90_000); showHud("+90s") }
         if (hasPrev) row("Previous episode") { switchTo(siblings[siblingIndex - 1].id) }
@@ -566,17 +641,339 @@ class PlayerActivity : ComponentActivity() {
     private fun qualityText() = if (quality == Quality.ORIGINAL) "Original" else quality.label.substringBefore(' ')
     private fun speedText(f: Float) = (if (f % 1f == 0f) f.toInt().toString() else f.toString()) + "x"
 
+    // ================================================================= subtitles
+    private val subColors = intArrayOf(Color.WHITE, 0xFFFFEB3B.toInt(), 0xFF00E5FF.toInt(), 0xFF69F0AE.toInt(), 0xFFFFA726.toInt())
+    private val subColorNames = listOf("White", "Yellow", "Cyan", "Green", "Orange")
+    private val subSizes = intArrayOf(16, 20, 26, 32)
+    private val subSizeNames = listOf("Small", "Medium", "Large", "Extra large")
+    private val subBgs = intArrayOf(0x00000000, 0x99000000.toInt(), 0xFF000000.toInt())
+    private val subBgNames = listOf("None", "Semi-transparent", "Solid black")
+    private val subEdgeNames = listOf("None", "Shadow", "Outline")
+
+    private fun applySubStyle() {
+        val size = subSizes[prefs.getInt("sub_size", 1).coerceIn(0, subSizes.size - 1)]
+        val color = subColors[prefs.getInt("sub_color", 0).coerceIn(0, subColors.size - 1)]
+        val bg = subBgs[prefs.getInt("sub_bg", 1).coerceIn(0, subBgs.size - 1)]
+        val edge = prefs.getInt("sub_edge", 1)
+        val bold = prefs.getInt("sub_bold", 0) == 1
+        subText.textSize = size.toFloat()
+        subText.setTextColor(color)
+        subText.setTypeface(Typeface.DEFAULT, if (bold) Typeface.BOLD else Typeface.NORMAL)
+        subText.setPadding(dp(8), dp(3), dp(8), dp(3))
+        subText.background = GradientDrawable().apply { setColor(bg); cornerRadius = dp(6).toFloat() }
+        when (edge) {
+            1 -> subText.setShadowLayer(4f, 2f, 2f, Color.BLACK)
+            2 -> subText.setShadowLayer(6f, 0f, 0f, Color.BLACK)
+            else -> subText.setShadowLayer(0f, 0f, 0f, 0)
+        }
+    }
+
+    private fun layoutSubtitle() {
+        val lp = subText.layoutParams as FrameLayout.LayoutParams
+        val h = if (root.height > 0) root.height else resources.displayMetrics.heightPixels
+        lp.bottomMargin = (subPos * h).toInt() + (if (controlsVisible) dp(110) else 0)
+        subText.maxWidth = (resources.displayMetrics.widthPixels * 0.85f).toInt()
+        subText.layoutParams = lp
+    }
+
+    private fun updateSubtitle() {
+        if (System.currentTimeMillis() < previewUntil) return
+        if (!subOn || cues.isEmpty()) {
+            if (subText.visibility != View.GONE) subText.visibility = View.GONE
+            shownText = ""
+            return
+        }
+        val txt = SubParser.activeText(cues, player.currentPosition - subDelayMs)
+        if (txt != shownText) {
+            shownText = txt
+            subText.text = txt
+            subText.visibility = if (txt.isEmpty()) View.GONE else View.VISIBLE
+        }
+    }
+
+    private fun previewSubtitle() {
+        previewUntil = System.currentTimeMillis() + 2500
+        subText.text = "Sample subtitle text"
+        subText.visibility = View.VISIBLE
+        handler.postDelayed({ shownText = "~"; updateSubtitle() }, 2600)
+    }
+
+    private fun delayText() = "%+.1f s".format(subDelayMs / 1000f)
+
+    private fun subExt(codec: String?): String = when (codec?.lowercase()) {
+        "ass", "ssa" -> "ass"
+        "webvtt", "vtt" -> "vtt"
+        else -> "srt"
+    }
+
+    private fun streamLabel(s: MediaStream): String = s.title ?: s.language ?: ("Subtitle " + s.index)
+
+    private fun nativeImageGroups(): List<Tracks.Group> = player.currentTracks.groups.filter {
+        it.type == C.TRACK_TYPE_TEXT && it.isSupported &&
+            (it.getTrackFormat(0).sampleMimeType == MimeTypes.APPLICATION_PGS ||
+                it.getTrackFormat(0).sampleMimeType == MimeTypes.APPLICATION_DVBSUBS)
+    }
+
+    private fun setNativeText(group: Tracks.Group?) {
+        val b = player.trackSelectionParameters.buildUpon()
+        if (group == null) {
+            b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true); nativeOn = false
+        } else {
+            b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, 0))
+            nativeOn = true
+        }
+        player.trackSelectionParameters = b.build()
+    }
+
+    private fun subtitlesOff() {
+        subOn = false; activeSub = -1; cues = emptyList()
+        setNativeText(null)
+        updateSubtitle()
+        showHud("Subtitles off")
+    }
+
+    private fun selectNativeSubtitle(g: Tracks.Group) {
+        cues = emptyList(); subOn = false; activeSub = -1
+        setNativeText(g)
+        updateSubtitle()
+        showHud("Image subtitles on")
+    }
+
+    private fun selectSubStream(i: Int) {
+        val st = subStreams.getOrNull(i) ?: return
+        if (!st.isText) { showHud("Image subtitle (${st.codec ?: "?"}). Use the embedded image list if shown"); return }
+        lifecycleScope.launch {
+            try {
+                val bytes = Api.fetchBytes(Api.subtitleUrl(itemId, sourceId, st.index, subExt(st.codec)))
+                val parsed = SubParser.parse(Api.decodeText(bytes))
+                if (parsed == null) { showHud("Couldn't read this subtitle"); return@launch }
+                setNativeText(null)
+                cues = parsed; subOn = true; activeSub = i
+                shownText = "~"; updateSubtitle()
+                showHud("Subtitles: " + streamLabel(st), 1500)
+            } catch (e: Exception) { showHud("Couldn't load subtitle (${e.message})", 3000) }
+        }
+    }
+
+    private fun displayName(uri: Uri): String? =
+        contentResolver.query(uri, null, null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (i >= 0) c.getString(i) else null
+            } else null
+        }
+
+    private fun loadSubtitleFile(uri: Uri) {
+        lifecycleScope.launch {
+            try {
+                val name = withContext(Dispatchers.IO) { displayName(uri) } ?: "subtitle"
+                if (name.lowercase().endsWith(".idx")) {
+                    showHud("VobSub (.idx/.sub) is image-based and isn't supported", 3500); return@launch
+                }
+                val bytes = withContext(Dispatchers.IO) { contentResolver.openInputStream(uri)?.use { it.readBytes() } }
+                    ?: ByteArray(0)
+                val parsed = SubParser.parse(Api.decodeText(bytes))
+                if (parsed == null) {
+                    showHud("Unsupported subtitle. Use .srt, .ass/.ssa, .vtt or text .sub", 3500); return@launch
+                }
+                setNativeText(null)
+                cues = parsed; subOn = true; activeSub = -2
+                shownText = "~"; updateSubtitle()
+                showHud("Subtitles: $name", 1500)
+            } catch (e: Exception) { showHud("Couldn't open file (${e.message})", 3000) }
+        }
+    }
+
+    private fun toggleSubtitles() {
+        if (cues.isNotEmpty()) {
+            subOn = !subOn; shownText = "~"; updateSubtitle()
+            showHud(if (subOn) "Subtitles on" else "Subtitles off")
+        } else {
+            val def = subStreams.indexOfFirst { it.isDefault && it.isText }
+            val first = if (def >= 0) def else subStreams.indexOfFirst { it.isText }
+            if (first >= 0) selectSubStream(first) else showSubtitleSheet()
+        }
+    }
+
+    private fun showSubtitleSheet() = sheet("Subtitles") { box, dlg ->
+        val labels = ArrayList<String>()
+        labels.add("Off")
+        subStreams.forEach { labels.add(streamLabel(it) + (if (it.isText) "" else "  (image)")) }
+        labels.add("Load from file…")
+        val checked = when {
+            !subOn -> 0
+            activeSub >= 0 -> activeSub + 1
+            activeSub == -2 -> labels.size - 1
+            else -> 0
+        }
+        box.addView(radioGroup(100, labels, checked) { i ->
+            dlg.dismiss()
+            when {
+                i == 0 -> subtitlesOff()
+                i == labels.size - 1 -> subFilePicker.launch(arrayOf("*/*"))
+                else -> selectSubStream(i - 1)
+            }
+        })
+        val nativeGroups = nativeImageGroups()
+        if (nativeGroups.isNotEmpty()) {
+            box.addView(sectionLabel("Embedded image subtitles"))
+            val sel = if (nativeOn) nativeGroups.indexOfFirst { it.isSelected } else -1
+            box.addView(radioGroup(200, nativeGroups.mapIndexed { i, g -> trackLabel(g, i) }, sel) { i ->
+                dlg.dismiss(); selectNativeSubtitle(nativeGroups[i])
+            })
+        }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(14), 0, 0) }
+        row.addView(pill("Style") { dlg.dismiss(); showSubtitleStyleSheet() },
+            LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) })
+        row.addView(pill("Sync  (" + delayText() + ")") { dlg.dismiss(); showSubtitleSyncSheet() })
+        box.addView(row)
+        box.addView(noteText(
+            "Supports .srt, .ass/.ssa, .vtt and text .sub. Tip: swipe left or right on the subtitle text to jump " +
+                "between lines, and drag it up or down to move it."))
+    }
+
+    private fun showSubtitleStyleSheet() = sheet("Subtitle style") { box, _ ->
+        fun group(title: String, base: Int, names: List<String>, key: String, def: Int) {
+            box.addView(sectionLabel(title))
+            box.addView(radioGroup(base, names, prefs.getInt(key, def)) { i ->
+                prefs.edit().putInt(key, i).apply()
+                applySubStyle(); layoutSubtitle(); previewSubtitle()
+            })
+        }
+        group("Text size", 100, subSizeNames, "sub_size", 1)
+        group("Text color", 200, subColorNames, "sub_color", 0)
+        group("Background", 300, subBgNames, "sub_bg", 1)
+        group("Edge", 400, subEdgeNames, "sub_edge", 1)
+        group("Weight", 500, listOf("Normal", "Bold"), "sub_bold", 0)
+    }
+
+    private fun showSubtitleSyncSheet() = sheet("Subtitle sync") { box, _ ->
+        val value = TextView(this).apply {
+            text = delayText(); setTextColor(Color.WHITE); textSize = 30f; gravity = Gravity.CENTER
+            setPadding(0, dp(12), 0, dp(12))
+        }
+        box.addView(value)
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        fun step(label: String, delta: Long) {
+            row.addView(pill(label) {
+                subDelayMs = if (delta == 0L) 0L else subDelayMs + delta
+                value.text = delayText(); shownText = "~"; updateSubtitle()
+            }, LinearLayout.LayoutParams(-2, -2).apply { setMargins(dp(4), 0, dp(4), 0) })
+        }
+        step("-1s", -1000L); step("-0.1s", -100L); step("Reset", 0L); step("+0.1s", 100L); step("+1s", 1000L)
+        box.addView(row)
+        box.addView(noteText("A positive delay shows subtitles later; a negative delay shows them earlier."))
+    }
+
+    /** Swipe on the subtitle text: left/right jumps between lines, up/down moves the text. */
+    private fun handleSubtitleTouch(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (locked || !subText.isShown) return false
+                val pad = dp(28)
+                val inside = ev.x >= subText.left - pad && ev.x <= subText.right + pad &&
+                    ev.y >= subText.top - pad && ev.y <= subText.bottom + pad
+                if (!inside) return false
+                subDrag = true; subMode = 0
+                subDownX = ev.x; subDownY = ev.y; subStartPos = subPos
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!subDrag) return false
+                val dx = ev.x - subDownX
+                val dy = ev.y - subDownY
+                if (subMode == 0) {
+                    if (abs(dy) > dp(10) && abs(dy) > abs(dx)) subMode = 1
+                    else if (abs(dx) > dp(10)) subMode = 2
+                }
+                if (subMode == 1) {
+                    subPos = (subStartPos - dy / root.height).coerceIn(0.02f, 0.6f)
+                    layoutSubtitle()
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (!subDrag) return false
+                subDrag = false
+                val dx = ev.x - subDownX
+                if (subMode == 2 && abs(dx) > dp(60)) jumpSubtitle(if (dx > 0) 1 else -1)
+                else if (subMode == 1) prefs.edit().putFloat("sub_pos", subPos).apply()
+                else if (subMode == 0) { if (controlsVisible) hideControls() else showControls() }
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun jumpSubtitle(dir: Int) {
+        if (cues.isEmpty()) return
+        val t = player.currentPosition - subDelayMs
+        val idx = SubParser.indexAt(cues, t)
+        val target: SubCue? = if (dir > 0) cues.getOrNull(idx + 1) else {
+            val active = idx >= 0 && t <= cues[idx].endMs
+            cues.getOrNull(if (active) idx - 1 else idx)
+        }
+        if (target != null) {
+            player.seekTo((target.startMs + subDelayMs).coerceAtLeast(0L))
+            showHud(if (dir > 0) "Next subtitle" else "Previous subtitle")
+        }
+    }
+
+    // ================================================================= volume + boost
+    private fun maxVol() = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+
+    private fun currentVolumeLevel(): Float {
+        val m = maxVol().toFloat()
+        val sys = audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
+        return if (boostPct > 100) m + (boostPct - 100) / 100f * m else sys
+    }
+
+    private fun volumePercent(): Int = (currentVolumeLevel() / maxVol() * 100).toInt()
+
+    /** Level runs from 0 to 2x the system maximum; anything above the maximum is software boost. */
+    private fun setVolumeLevel(level: Float) {
+        val m = maxVol().toFloat()
+        val l = level.coerceIn(0f, m * 2f)
+        audio.setStreamVolume(AudioManager.STREAM_MUSIC, minOf(l, m).toInt(), 0)
+        boostPct = if (l > m) 100 + ((l - m) / m * 100).toInt() else 100
+        applyBoost()
+        volLabel.text = "${volumePercent()}%"
+    }
+
+    private fun applyBoost() {
+        val e = enhancer ?: return
+        try {
+            if (boostPct <= 100) {
+                e.setEnabled(false)
+            } else {
+                e.setTargetGain((2000.0 * log10(boostPct / 100.0)).toInt())
+                e.setEnabled(true)
+            }
+        } catch (ex: Exception) { /* effect not available on this device */ }
+    }
+
+    private fun attachEnhancer(sessionId: Int) {
+        try { enhancer?.release() } catch (ex: Exception) { }
+        enhancer = null
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET) return
+        try {
+            enhancer = LoudnessEnhancer(sessionId)
+            applyBoost()
+        } catch (ex: Exception) { enhancer = null }
+    }
+
     // ================================================================= controls visibility
     private fun showControls() {
         if (locked) return
         controlsVisible = true; controls.visibility = View.VISIBLE
-        volSeek.progress = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
-        updateProgress(); scheduleHide()
+        layoutSubtitle(); updateProgress(); scheduleHide()
     }
 
     private fun hideControls() {
         controlsVisible = false; controls.visibility = View.GONE
         handler.removeCallbacks(autoHide)
+        layoutSubtitle()
     }
 
     private fun scheduleHide() {
@@ -591,11 +988,12 @@ class PlayerActivity : ComponentActivity() {
         seek.secondaryProgress = player.bufferedPosition.toInt().coerceAtLeast(0)
         curTime.text = fmt(player.currentPosition)
         durTime.text = if (dur > 0) fmt(dur) else "--:--"
+        volLabel.text = "${volumePercent()}%"
     }
 
     // ================================================================= playback
     private suspend fun buildMediaItem(): MediaItem {
-        val b = MediaItem.Builder().setSubtitleConfigurations(subs)
+        val b = MediaItem.Builder()
         if (!isTranscoding) {
             b.setUri(Api.streamUrl(itemId, sourceId))
         } else {
@@ -621,12 +1019,14 @@ class PlayerActivity : ComponentActivity() {
                     if (autoPlayNext && hasNext) switchTo(siblings[siblingIndex + 1].id) else finish()
                 }
             }
+            override fun onAudioSessionIdChanged(audioSessionId: Int) { attachEnhancer(audioSessionId) }
             override fun onPlayerError(error: PlaybackException) {
                 val http = generateSequence<Throwable>(error) { it.cause }
                     .filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
                 val detail = http?.let { " [HTTP ${it.responseCode} ${it.dataSpec.uri.lastPathSegment}]" } ?: ""
+                val hint = if (error.errorCodeName.contains("DECOD")) " Try another decoder (HW / HW+ / SW)." else ""
                 showHud(if (isTranscoding) "Transcode failed: ${error.errorCodeName}$detail"
-                        else "Playback error: ${error.errorCodeName}$detail", 8000)
+                        else "Playback error: ${error.errorCodeName}$detail$hint", 8000)
             }
         })
     }
@@ -652,18 +1052,15 @@ class PlayerActivity : ComponentActivity() {
             subTitle.text = nowPlayingText(true)
             val video = src.streams.firstOrNull { it.type == "Video" }
             val h = video?.height ?: 0
-            val res = when { h >= 2000 -> "4K"; h >= 1000 -> "1080p"; h >= 700 -> "720p"; else -> "" }
+            val res = when { h >= 4000 -> "8K"; h >= 2000 -> "4K"; h >= 1000 -> "1080p"; h >= 700 -> "720p"; else -> "" }
             badgeRow.removeAllViews()
             if (res.isNotEmpty()) badgeRow.addView(badge(res, false))
             if (video?.videoRange?.contains("HDR", ignoreCase = true) == true) {
                 badgeRow.addView(badge("HDR", true), LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(6) })
             }
             badgeRow.visibility = if (badgeRow.childCount > 0) View.VISIBLE else View.GONE
-            subs = src.streams.filter { it.type == "Subtitle" && it.isExternal }.map {
-                MediaItem.SubtitleConfiguration.Builder(Uri.parse(Api.subtitleUrl(itemId, sourceId, it.index)))
-                    .setMimeType(MimeTypes.APPLICATION_SUBRIP)
-                    .setLanguage(it.language).setLabel(it.title ?: it.language ?: "Subtitle").build()
-            }
+            subStreams = src.streams.filter { it.type == "Subtitle" }
+
             player.setMediaItem(buildMediaItem())
             player.prepare()
             val resumeMs = (item.userData?.positionTicks ?: 0L) / 10_000
@@ -686,6 +1083,8 @@ class PlayerActivity : ComponentActivity() {
         handler.removeCallbacks(progressTick)
         sourceId = ""; itemId = newId
         sessionId = UUID.randomUUID().toString().replace("-", "")
+        cues = emptyList(); subOn = false; activeSub = -1; subStreams = emptyList(); shownText = ""
+        setNativeText(null)
         player.stop(); player.clearMediaItems()
         loadAndPlay()
     }
@@ -693,8 +1092,7 @@ class PlayerActivity : ComponentActivity() {
     private fun applyChoice(nq: Quality, na: AudioMode) {
         if (nq == quality && na == audioMode) return
         quality = nq; audioMode = na
-        getSharedPreferences("player", MODE_PRIVATE).edit()
-            .putString("quality", quality.name).putString("audio", audioMode.name).apply()
+        prefs.edit().putString("quality", quality.name).putString("audio", audioMode.name).apply()
         applyPlayback()
     }
 
@@ -748,6 +1146,11 @@ class PlayerActivity : ComponentActivity() {
 
     private fun enterPip() {
         if (Build.VERSION.SDK_INT >= 26) enterPictureInPictureMode(PictureInPictureParams.Builder().build())
+    }
+
+    private fun openCast() {
+        try { startActivity(Intent(Settings.ACTION_CAST_SETTINGS)) }
+        catch (e: Exception) { showHud("Casting isn't available on this device") }
     }
 
     private fun takeScreenshot() {
@@ -831,7 +1234,7 @@ class PlayerActivity : ComponentActivity() {
                             val b = window.attributes.screenBrightness
                             brightness = if (b < 0) 0.5f else b; Mode.BRIGHT
                         }
-                        else -> { volF = audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat(); Mode.VOLUME }
+                        else -> { volF = currentVolumeLevel(); Mode.VOLUME }
                     }
                 }
                 when (mode) {
@@ -847,11 +1250,9 @@ class PlayerActivity : ComponentActivity() {
                         showHud("Brightness ${(brightness * 100).toInt()}%")
                     }
                     Mode.VOLUME -> {
-                        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                        volF = (volF + dy / playerView.height * max * 1.5f).coerceIn(0f, max.toFloat())
-                        audio.setStreamVolume(AudioManager.STREAM_MUSIC, volF.toInt(), 0)
-                        volSeek.progress = volF.toInt()
-                        showHud("Volume ${(volF / max * 100).toInt()}%")
+                        volF = (volF + dy / playerView.height * maxVol() * 2.4f).coerceIn(0f, maxVol() * 2f)
+                        setVolumeLevel(volF)
+                        showHud("Volume ${volumePercent()}%")
                     }
                     else -> {}
                 }
@@ -859,6 +1260,7 @@ class PlayerActivity : ComponentActivity() {
             }
         })
         playerView.setOnTouchListener { _, ev ->
+            if (handleSubtitleTouch(ev)) return@setOnTouchListener true
             scale.onTouchEvent(ev)
             gd.onTouchEvent(ev)
             if (ev.actionMasked == MotionEvent.ACTION_UP || ev.actionMasked == MotionEvent.ACTION_CANCEL) {
@@ -893,7 +1295,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     override fun onUserLeaveHint() {
-        if (player.isPlaying) enterPip()
+        if (::player.isInitialized && player.isPlaying) enterPip()
     }
 
     override fun onPictureInPictureModeChanged(isInPip: Boolean, newConfig: Configuration) {
@@ -904,7 +1306,7 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        if (!isInPictureInPictureMode) player.pause()
+        if (::player.isInitialized && !isInPictureInPictureMode) player.pause()
     }
 
     override fun onDestroy() {
@@ -915,6 +1317,7 @@ class PlayerActivity : ComponentActivity() {
             val tc = isTranscoding; val sid = sessionId
             CoroutineScope(Dispatchers.IO).launch { Api.report("stop", id, src, pos, true, tc, sid) }
         }
+        try { enhancer?.release() } catch (e: Exception) { }
         player.release()
         super.onDestroy()
     }

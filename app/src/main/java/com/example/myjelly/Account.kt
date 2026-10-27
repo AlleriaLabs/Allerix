@@ -383,6 +383,9 @@ fun PlaybackSettingsScreen(back: () -> Unit) {
     var audio by remember {
         mutableStateOf(runCatching { AudioMode.valueOf(prefs.getString("audio", "ORIGINAL") ?: "ORIGINAL") }.getOrDefault(AudioMode.ORIGINAL))
     }
+    var decoder by remember {
+        mutableStateOf(runCatching { DecoderMode.valueOf(prefs.getString("decoder", "HW") ?: "HW") }.getOrDefault(DecoderMode.HW))
+    }
     var speed by remember { mutableStateOf(prefs.getFloat("speed", 1f)) }
     var autoPlay by remember { mutableStateOf(prefs.getBoolean("autoplay", true)) }
     var dialog by remember { mutableStateOf(0) }
@@ -393,6 +396,7 @@ fun PlaybackSettingsScreen(back: () -> Unit) {
             SettingsRow("HD", "Quality", quality.label) { dialog = 1 }
             SettingsRow("🔊", "Audio output", audio.label) { dialog = 2 }
             SettingsRow("⏱", "Playback speed", speedLabel(speed)) { dialog = 3 }
+            SettingsRow("⚙", "Decoder", "${decoder.label} · ${decoder.desc}") { dialog = 4 }
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -424,6 +428,8 @@ fun PlaybackSettingsScreen(back: () -> Unit) {
             { audio = it; prefs.edit().putString("audio", it.name).apply() }, { dialog = 0 })
         3 -> ChoiceDialog("Playback speed", listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f).map { speedLabel(it) to it }, speed,
             { speed = it; prefs.edit().putFloat("speed", it).apply() }, { dialog = 0 })
+        4 -> ChoiceDialog("Decoder", DecoderMode.values().map { "${it.label} · ${it.desc}" to it }, decoder,
+            { decoder = it; prefs.edit().putString("decoder", it.name).apply() }, { dialog = 0 })
         else -> {}
     }
 }

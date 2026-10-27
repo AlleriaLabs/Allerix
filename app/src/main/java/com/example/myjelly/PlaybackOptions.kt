@@ -16,3 +16,9 @@ enum class AudioMode(val label: String, val channels: Int, val bitrate: Int) {
     SURROUND51("5.1", 6, 384_000),
     SURROUND71("7.1", 8, 512_000)
 }
+
+enum class DecoderMode(val label: String, val desc: String) {
+    HW("HW", "Hardware decoder"),
+    HW_PLUS("HW+", "Hardware, optimised"),
+    SW("SW", "Software decoder")
+}

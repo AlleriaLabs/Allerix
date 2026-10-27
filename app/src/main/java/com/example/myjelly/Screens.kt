@@ -109,7 +109,7 @@ fun HomeScreen(
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
             item { HeroCarousel(heroes, pager, onPlay, onOpen) }
             if (trending.isNotEmpty()) item { MediaRow("Trending Now  ›", trending, onClick = onOpen) }
-            if (resume.isNotEmpty()) item { ContinueSection(resume, onPlay) }
+            if (resume.isNotEmpty()) item { MediaRow("Continue Watching  ›", resume, onClick = onPlay) }
             items(rows, key = { it.first.id }) { (lib, list) ->
                 MediaRow("Latest in ${lib.name}", list, onClick = onOpen, onSeeAll = { onSeeAll(lib) })
             }
@@ -234,49 +234,6 @@ fun MediaCard(item: Item, modifier: Modifier, landscape: Boolean = false, onClic
             caption, color = Grey, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 4.dp)
         )
-    }
-}
-
-@Composable
-fun ContinueSection(list: List<Item>, onClick: (Item) -> Unit) {
-    Column(Modifier.padding(top = 22.dp)) {
-        Text(
-            "Continue Watching  ›", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp)
-        )
-        list.take(4).forEach { ContinueRow(it) { onClick(it) } }
-    }
-}
-
-@Composable
-fun ContinueRow(item: Item, onClick: () -> Unit) {
-    val rt = item.runTimeTicks ?: 0L
-    val pos = item.userData?.positionTicks ?: 0L
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp)
-            .glass(14.dp).clickable(onClick = onClick).padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(Modifier.width(112.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp)).background(Color(0xFF1F1F23))) {
-            AsyncImage(Api.landscape(item), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-        }
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                item.seriesName ?: item.name, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold,
-                maxLines = 1, overflow = TextOverflow.Ellipsis
-            )
-            Text(leftText(item), color = Grey, fontSize = 12.sp)
-            Spacer(Modifier.height(8.dp))
-            LinearProgressIndicator(
-                progress = { if (rt > 0) (pos.toFloat() / rt).coerceIn(0f, 1f) else 0f },
-                modifier = Modifier.fillMaxWidth().height(3.dp), color = Red, trackColor = Color(0x33FFFFFF)
-            )
-        }
-        Spacer(Modifier.width(10.dp))
-        Box(Modifier.size(38.dp).clip(CircleShape).background(Color(0x33FFFFFF)), contentAlignment = Alignment.Center) {
-            SmallIcon(R.drawable.ic_play, Color.White, 20)
-        }
     }
 }
 
@@ -577,7 +534,7 @@ fun DownloadsTab(onPlay: (Item) -> Unit, onSettings: () -> Unit) {
     AppBackground {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
             item { TabHeader("Downloads", null, onSettings) }
-            if (resume.isNotEmpty()) item { ContinueSection(resume, onPlay) }
+            if (resume.isNotEmpty()) item { MediaRow("Continue Watching  ›", resume, onClick = onPlay) }
             item {
                 Text(
                     "Downloads", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold,
@@ -672,7 +629,7 @@ fun DetailScreen(base: Item, onOpen: (Item) -> Unit, onPlay: (Item) -> Unit, bac
 
     val video = cur.mediaSources?.firstOrNull()?.streams?.firstOrNull { it.type == "Video" }
     val h = video?.height ?: 0
-    val resBadge = when { h >= 2000 -> "4K"; h >= 1000 -> "1080p"; h >= 700 -> "720p"; h > 0 -> "SD"; else -> "" }
+    val resBadge = when { h >= 4000 -> "8K"; h >= 2000 -> "4K"; h >= 1000 -> "1080p"; h >= 700 -> "720p"; h > 0 -> "SD"; else -> "" }
     val hdr = video?.videoRange?.contains("HDR", ignoreCase = true) == true
     val meta = listOfNotNull(cur.year?.toString(), fmtRuntime(cur.runTimeTicks).ifEmpty { null }, cur.officialRating)
         .joinToString("   •   ")
