@@ -16,6 +16,9 @@ import okhttp3.RequestBody.Companion.toRequestBody
 
 data class TranscodeInfo(val url: String, val sessionId: String)
 
+/** What the player will actually do for this video on this phone. */
+data class PlaybackPlan(val url: String, val hls: Boolean, val transcoding: Boolean, val sessionId: String, val label: String)
+
 object Api {
     const val SERVER = "https://flix.alleriafilmotheque.fyi"
     var base = SERVER
@@ -302,6 +305,93 @@ object Api {
             }
         } catch (e: Exception) { /* fall through to the manual URL */ }
         return TranscodeInfo(hlsUrl(id, sourceId, q, a, fallbackSession), fallbackSession)
+    }
+
+    /**
+     * "Auto": send the server a profile built from this phone's real decoders, then follow its decision:
+     * direct play when the phone can handle the file, otherwise a transcode that fixes only what is unsupported.
+     */
+    suspend fun autoPlan(ctx: Context, id: String, sourceId: String, fallbackSession: String): PlaybackPlan {
+        val direct = PlaybackPlan(streamUrl(id, sourceId), false, false, fallbackSession, "Direct play")
+        try {
+            val caps = withContext(Dispatchers.IO) { Device.caps(ctx) }   // first scan of decoders can take a moment
+            val saveData = ctx.getSharedPreferences("player", Context.MODE_PRIVATE).getBoolean("save_data", true)
+            val pol = Device.policy(ctx, caps, saveData)
+            val vcaps = Device.directPlayVideo(caps)
+            val vNames = vcaps.map { it.first }
+            val aNames = caps.audioCodecs
+            val profile = buildJsonObject {
+                put("Name", "Alleria Android")
+                put("MaxStreamingBitrate", pol.maxBitrate)
+                put("MaxStaticBitrate", pol.maxBitrate)
+                put("MusicStreamingTranscodingBitrate", 192_000)
+                putJsonArray("DirectPlayProfiles") {
+                    addJsonObject {
+                        put("Type", "Video")
+                        put("Container", "mp4,m4v,mkv,webm,mov,ts,mpegts,3gp,flv,mpg,mpeg")
+                        put("VideoCodec", vNames.joinToString(","))
+                        put("AudioCodec", aNames.joinToString(","))
+                    }
+                }
+                putJsonArray("TranscodingProfiles") {
+                    addJsonObject {
+                        put("Container", "ts"); put("Type", "Video"); put("Protocol", "hls"); put("Context", "Streaming")
+                        put("VideoCodec", if (vNames.contains("hevc")) "h264,hevc" else "h264")
+                        put("AudioCodec", "aac"); put("MaxAudioChannels", "6")
+                        put("MinSegments", "2"); put("BreakOnNonKeyFrames", true)
+                    }
+                }
+                putJsonArray("CodecProfiles") {
+                    addJsonObject {
+                        put("Type", "Video")
+                        putJsonArray("Conditions") {
+                            addJsonObject {
+                                put("Condition", "LessThanEqual"); put("Property", "Height")
+                                put("Value", pol.maxHeight.toString()); put("IsRequired", false)
+                            }
+                        }
+                    }
+                    for ((name, h) in vcaps) {
+                        addJsonObject {
+                            put("Type", "Video"); put("Codec", name)
+                            putJsonArray("Conditions") {
+                                addJsonObject {
+                                    put("Condition", "LessThanEqual"); put("Property", "Height")
+                                    put("Value", h.toString()); put("IsRequired", false)
+                                }
+                            }
+                        }
+                    }
+                }
+                putJsonArray("SubtitleProfiles") {
+                    for (f in listOf("srt", "ass", "ssa", "vtt")) {
+                        addJsonObject { put("Format", f); put("Method", "External") }
+                    }
+                }
+            }
+            val body = buildJsonObject {
+                put("UserId", userId); put("MediaSourceId", sourceId)
+                put("MaxStreamingBitrate", pol.maxBitrate)
+                put("EnableDirectPlay", true); put("EnableDirectStream", true); put("EnableTranscoding", true)
+                put("AllowVideoStreamCopy", true); put("AllowAudioStreamCopy", true)
+                put("AutoOpenLiveStream", false)
+                put("DeviceProfile", profile)
+            }.toString()
+            val info = json.decodeFromString<PlaybackInfo>(call("POST", "/Items/$id/PlaybackInfo", body))
+            val src = info.sources.firstOrNull { it.id == sourceId } ?: info.sources.firstOrNull() ?: return direct
+            val sid = info.playSessionId ?: fallbackSession
+            val tu = src.transcodingUrl
+            if (src.directPlay && tu.isNullOrEmpty()) return PlaybackPlan(streamUrl(id, sourceId), false, false, sid, "Direct play")
+            if (!tu.isNullOrEmpty()) {
+                val url = if (tu.startsWith("http")) tu else base + (if (tu.startsWith("/")) tu else "/$tu")
+                val full = if (url.contains("api_key=")) url else url + (if (url.contains("?")) "&" else "?") + "api_key=$token"
+                val reasons = Regex("[?&]TranscodeReasons=([^&]+)", RegexOption.IGNORE_CASE).find(full)
+                    ?.groupValues?.get(1)?.replace(",", ", ").orEmpty()
+                val label = "Transcoding" + (if (reasons.isNotEmpty()) " ($reasons)" else "")
+                return PlaybackPlan(full, full.contains(".m3u8", ignoreCase = true), true, sid, label)
+            }
+        } catch (e: Exception) { /* fall back to direct play below */ }
+        return direct
     }
 
     fun subtitleUrl(id: String, sourceId: String, index: Int, ext: String = "srt") =

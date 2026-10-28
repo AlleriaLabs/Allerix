@@ -76,7 +76,9 @@ import kotlinx.serialization.Serializable
 )
 @Serializable data class PlaybackSource(
     @SerialName("Id") val id: String = "",
-    @SerialName("TranscodingUrl") val transcodingUrl: String? = null
+    @SerialName("TranscodingUrl") val transcodingUrl: String? = null,
+    @SerialName("SupportsDirectPlay") val directPlay: Boolean = false,
+    @SerialName("SupportsDirectStream") val directStream: Boolean = false
 )
 
 @Serializable data class Person(

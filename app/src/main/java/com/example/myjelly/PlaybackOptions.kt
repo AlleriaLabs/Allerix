@@ -1,6 +1,7 @@
 package com.example.myjelly
 
 enum class Quality(val label: String, val height: Int, val videoBitrate: Int) {
+    AUTO("Auto (best for this phone)", 0, 0),
     ORIGINAL("Original (Direct Play)", 0, 0),
     P480("480p", 480, 1_500_000),
     P720("720p", 720, 4_000_000),

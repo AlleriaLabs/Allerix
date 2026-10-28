@@ -420,7 +420,7 @@ fun SearchScreen(onOpen: (Item) -> Unit, back: () -> Unit) {
 // ------------------------------------------------------------------ my list + profile
 @Composable
 fun MyListTab(
-    onOpen: (Item) -> Unit, onProfile: () -> Unit, onSettings: () -> Unit, onSignOut: () -> Unit,
+    onOpen: (Item) -> Unit, onSettings: () -> Unit, onSignOut: () -> Unit,
     onWeb: (String, String) -> Unit
 ) {
     val ctx = LocalContext.current
@@ -454,7 +454,6 @@ fun MyListTab(
                 Box(Modifier.fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
                     Image(painterResource(R.drawable.logo_banner), null, Modifier.height(34.dp).aspectRatio(4.198f))
                 }
-                ProfileRow("👤", "My Profile", Api.username, onProfile)
                 ProfileRow("?", "Help & Support", "", { help = true })
                 ProfileRow("⎋", "Sign Out", "", onSignOut)
             }
@@ -467,7 +466,7 @@ fun MyListTab(
         text = {
             Text(
                 "Forgot your password or need to update your email, Telegram or Discord? Use the account portal. " +
-                    "To ask for a movie or show, go to Settings, Request a show.",
+                    "To ask for a movie or show, tap the settings icon at the top right, then Request a show.",
                 color = Grey, fontSize = 14.sp
             )
         },
@@ -519,12 +518,10 @@ fun rememberDownloadStarter(): (Item) -> Unit {
 }
 
 @Composable
-fun DownloadsTab(onPlay: (Item) -> Unit, onSettings: () -> Unit) {
+fun DownloadsTab(onSettings: () -> Unit) {
     val ctx = LocalContext.current
     var recs by remember { mutableStateOf(Downloads.list(ctx)) }
     var states by remember { mutableStateOf<Map<String, DlState>>(emptyMap()) }
-    var resume by remember { mutableStateOf<List<Item>>(emptyList()) }
-    LaunchedEffect(Unit) { resume = runCatching { Api.resume() }.getOrDefault(emptyList()) }
     LaunchedEffect(recs) {
         while (true) {
             states = recs.associate { it.id to Downloads.state(ctx, it) }
@@ -534,7 +531,6 @@ fun DownloadsTab(onPlay: (Item) -> Unit, onSettings: () -> Unit) {
     AppBackground {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
             item { TabHeader("Downloads", null, onSettings) }
-            if (resume.isNotEmpty()) item { MediaRow("Continue Watching  ›", resume, onClick = onPlay) }
             item {
                 Text(
                     "Downloads", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold,

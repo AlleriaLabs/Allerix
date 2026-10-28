@@ -6,6 +6,7 @@ import android.content.ContentValues
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Bitmap
@@ -27,7 +28,10 @@ import android.text.SpannableString
 import android.text.Spanned
 import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
+import android.util.Rational
 import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.PixelCopy
@@ -48,10 +52,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.annotation.RequiresApi
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -116,6 +122,8 @@ class PlayerActivity : ComponentActivity() {
     private var decoder = DecoderMode.HW
     private var siblings: List<Item> = emptyList()
     private var siblingIndex = -1
+    private var plan: PlaybackPlan? = null
+    private var autoRetried = false
 
     // subtitles (own engine)
     private var subStreams: List<MediaStream> = emptyList()
@@ -159,7 +167,7 @@ class PlayerActivity : ComponentActivity() {
         if (uri != null) loadSubtitleFile(uri)
     }
 
-    private val isTranscoding get() = offlinePath == null && (quality != Quality.ORIGINAL || audioMode != AudioMode.ORIGINAL)
+    private val isTranscoding get() = offlinePath == null && plan?.transcoding == true
     private val hasNext get() = siblingIndex >= 0 && siblingIndex < siblings.size - 1
     private val hasPrev get() = siblingIndex > 0
 
@@ -187,8 +195,8 @@ class PlayerActivity : ComponentActivity() {
         offlinePath = intent.getStringExtra("file")
         audio = getSystemService(AUDIO_SERVICE) as AudioManager
         prefs = getSharedPreferences("player", MODE_PRIVATE)
-        quality = runCatching { Quality.valueOf(prefs.getString("quality", "ORIGINAL") ?: "ORIGINAL") }
-            .getOrDefault(Quality.ORIGINAL)
+        quality = runCatching { Quality.valueOf(prefs.getString("quality", "AUTO") ?: "AUTO") }
+            .getOrDefault(Quality.AUTO)
         audioMode = runCatching { AudioMode.valueOf(prefs.getString("audio", "ORIGINAL") ?: "ORIGINAL") }
             .getOrDefault(AudioMode.ORIGINAL)
         decoder = runCatching { DecoderMode.valueOf(prefs.getString("decoder", "HW") ?: "HW") }
@@ -199,6 +207,11 @@ class PlayerActivity : ComponentActivity() {
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (Build.VERSION.SDK_INT >= 28) {
+            val wlp = window.attributes
+            wlp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            window.attributes = wlp
+        }
         WindowInsetsControllerCompat(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.systemBars())
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -237,6 +250,12 @@ class PlayerActivity : ComponentActivity() {
         val p = ExoPlayer.Builder(this, factory)
             .setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000).build()
         p.setPlaybackSpeed(speed)
+        p.setAudioAttributes(
+            AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), true
+        )
+        p.setHandleAudioBecomingNoisy(true)
+        p.setWakeMode(C.WAKE_MODE_NETWORK)
+        p.setVideoChangeFrameRateStrategy(C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_ONLY_IF_SEAMLESS)
         // subtitles are drawn by our own engine; ExoPlayer's text renderer is only used for image subtitles
         p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
@@ -349,7 +368,7 @@ class PlayerActivity : ComponentActivity() {
             setPadding(0, 0, dp(6), 0)
         }
         val castBtn = icon(R.drawable.ic_cast)
-        val pipBtn = icon(R.drawable.ic_pip)
+        val pipBtn = icon(R.drawable.ic_pip).apply { if (!pipSupported()) visibility = View.GONE }
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(10), dp(8), dp(22))
@@ -453,6 +472,13 @@ class PlayerActivity : ComponentActivity() {
         setContentView(root)
         applySubStyle()
         layoutSubtitle()
+        // keep the controls clear of the notch / camera cut-out
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            val i = insets.getInsets(WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.systemBars())
+            controls.setPadding(i.left, i.top, i.right, i.bottom)
+            insets
+        }
+        ViewCompat.requestApplyInsets(root)
 
         act(backBtn) { finish() }
         act(castBtn) { openCast() }
@@ -622,6 +648,7 @@ class PlayerActivity : ComponentActivity() {
         fun row(label: String, value: String = "", onClick: () -> Unit) {
             box.addView(sheetRow(label, value) { dlg.dismiss(); onClick() })
         }
+        row("This phone & playback info") { showDeviceSheet() }
         row("Video quality", qualityText()) { showQualitySheet() }
         row("Audio output", audioMode.label) { showAudioOutputSheet() }
         row("Subtitle style") { showSubtitleStyleSheet() }
@@ -638,7 +665,11 @@ class PlayerActivity : ComponentActivity() {
         if (hasNext) row("Next episode") { switchTo(siblings[siblingIndex + 1].id) }
     }
 
-    private fun qualityText() = if (quality == Quality.ORIGINAL) "Original" else quality.label.substringBefore(' ')
+    private fun qualityText() = when (quality) {
+        Quality.AUTO -> "Auto"
+        Quality.ORIGINAL -> "Original"
+        else -> quality.label.substringBefore(' ')
+    }
     private fun speedText(f: Float) = (if (f % 1f == 0f) f.toInt().toString() else f.toString()) + "x"
 
     // ================================================================= subtitles
@@ -993,14 +1024,22 @@ class PlayerActivity : ComponentActivity() {
 
     // ================================================================= playback
     private suspend fun buildMediaItem(): MediaItem {
-        val b = MediaItem.Builder()
-        if (!isTranscoding) {
-            b.setUri(Api.streamUrl(itemId, sourceId))
-        } else {
-            val t = Api.transcodeUrl(itemId, sourceId, quality, audioMode, sessionId)
-            sessionId = t.sessionId
-            b.setUri(t.url).setMimeType(MimeTypes.APPLICATION_M3U8)
+        val q = quality
+        val chosen: PlaybackPlan = when {
+            q == Quality.AUTO && audioMode == AudioMode.ORIGINAL ->
+                Api.autoPlan(this@PlayerActivity, itemId, sourceId, sessionId)
+            q == Quality.ORIGINAL && audioMode == AudioMode.ORIGINAL ->
+                PlaybackPlan(Api.streamUrl(itemId, sourceId), false, false, sessionId, "Direct play (original file)")
+            else -> {
+                val useQ = if (q == Quality.AUTO) Quality.ORIGINAL else q
+                val t = Api.transcodeUrl(itemId, sourceId, useQ, audioMode, sessionId)
+                PlaybackPlan(t.url, true, true, t.sessionId, "Transcoding · ${useQ.label} · audio ${audioMode.label}")
+            }
         }
+        plan = chosen
+        sessionId = chosen.sessionId
+        val b = MediaItem.Builder().setUri(chosen.url)
+        if (chosen.hls) b.setMimeType(MimeTypes.APPLICATION_M3U8)
         return b.build()
     }
 
@@ -1021,6 +1060,11 @@ class PlayerActivity : ComponentActivity() {
             }
             override fun onAudioSessionIdChanged(audioSessionId: Int) { attachEnhancer(audioSessionId) }
             override fun onPlayerError(error: PlaybackException) {
+                // Auto mode: if this phone's decoder chokes on a direct-played file, switch to a transcode once
+                if (quality == Quality.AUTO && plan?.transcoding == false && !autoRetried && offlinePath == null &&
+                    error.errorCode in 4001..4005) {
+                    fallbackTranscode(); return
+                }
                 val http = generateSequence<Throwable>(error) { it.cause }
                     .filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
                 val detail = http?.let { " [HTTP ${it.responseCode} ${it.dataSpec.uri.lastPathSegment}]" } ?: ""
@@ -1052,6 +1096,11 @@ class PlayerActivity : ComponentActivity() {
             subTitle.text = nowPlayingText(true)
             val video = src.streams.firstOrNull { it.type == "Video" }
             val h = video?.height ?: 0
+            val range = video?.videoRange.orEmpty()
+            val hdrContent = range.contains("HDR", true) || range.contains("HLG", true) || range.contains("DOVI", true)
+            if (hdrContent && Build.VERSION.SDK_INT >= 26 && Device.caps(this@PlayerActivity).hdrTypes.isNotEmpty()) {
+                window.colorMode = ActivityInfo.COLOR_MODE_HDR   // use the phone's HDR display path
+            }
             val res = when { h >= 4000 -> "8K"; h >= 2000 -> "4K"; h >= 1000 -> "1080p"; h >= 700 -> "720p"; else -> "" }
             badgeRow.removeAllViews()
             if (res.isNotEmpty()) badgeRow.addView(badge(res, false))
@@ -1083,6 +1132,7 @@ class PlayerActivity : ComponentActivity() {
         handler.removeCallbacks(progressTick)
         sourceId = ""; itemId = newId
         sessionId = UUID.randomUUID().toString().replace("-", "")
+        autoRetried = false; plan = null
         cues = emptyList(); subOn = false; activeSub = -1; subStreams = emptyList(); shownText = ""
         setNativeText(null)
         player.stop(); player.clearMediaItems()
@@ -1144,8 +1194,19 @@ class PlayerActivity : ComponentActivity() {
         playerView.resizeMode = resizeModes[n]; showHud(resizeNames[n])
     }
 
+    private fun pipSupported(): Boolean =
+        Build.VERSION.SDK_INT >= 26 && packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    /** Picture-in-picture window uses the video's real shape. */
     private fun enterPip() {
-        if (Build.VERSION.SDK_INT >= 26) enterPictureInPictureMode(PictureInPictureParams.Builder().build())
+        if (!pipSupported()) { showHud("Picture-in-picture isn't supported on this phone"); return }
+        val b = PictureInPictureParams.Builder()
+        val vs = player.videoSize
+        if (vs.width > 0 && vs.height > 0) {
+            val r = (vs.width * vs.pixelWidthHeightRatio / vs.height).coerceIn(0.45f, 2.3f)
+            b.setAspectRatio(Rational((r * 1000).toInt(), 1000))
+        }
+        try { enterPictureInPictureMode(b.build()) } catch (e: Exception) { showHud("Can't enter picture-in-picture") }
     }
 
     private fun openCast() {
@@ -1179,6 +1240,7 @@ class PlayerActivity : ComponentActivity() {
 
     private fun toggleLock() {
         locked = !locked
+        root.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         if (locked) { hideControls(); showLockOverlay(); showHud("Locked") }
         else { lockOverlay.visibility = View.GONE; showControls(); showHud("Unlocked") }
     }
@@ -1223,6 +1285,7 @@ class PlayerActivity : ComponentActivity() {
             override fun onLongPress(e: MotionEvent) {
                 if (locked) return
                 longPressing = true; player.setPlaybackSpeed(2f); showHud("2x", 100_000)
+                root.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
             }
 
             override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
@@ -1286,6 +1349,34 @@ class PlayerActivity : ComponentActivity() {
         else "%02d:%02d".format(s / 60, s % 60)
     }
 
+    // ================================================================= phone-aware helpers
+    private fun showDeviceSheet() = sheet("This phone & playback") { box, _ ->
+        Device.describe(this, plan?.label).forEach { (k, v) ->
+            box.addView(TextView(this).apply {
+                text = k; setTextColor(0xFF8A8A90.toInt()); textSize = 12f; setPadding(0, dp(12), 0, 0)
+            })
+            box.addView(TextView(this).apply { text = v; setTextColor(Color.WHITE); textSize = 14f })
+        }
+        box.addView(noteText(
+            "Auto mode uses this information: it direct-plays what your phone can decode and only transcodes " +
+                "what it can't, and it eases off on mobile data, low battery or heat."))
+    }
+
+    private fun fallbackTranscode() {
+        autoRetried = true
+        showHud("This phone can't decode the original directly. Switching to transcoding…", 3500)
+        val pos = player.currentPosition
+        lifecycleScope.launch {
+            try {
+                val t = Api.transcodeUrl(itemId, sourceId, Quality.P1080, AudioMode.ORIGINAL, sessionId)
+                sessionId = t.sessionId
+                plan = PlaybackPlan(t.url, true, true, t.sessionId, "Transcoding · 1080p (automatic fallback)")
+                player.setMediaItem(MediaItem.Builder().setUri(t.url).setMimeType(MimeTypes.APPLICATION_M3U8).build(), pos)
+                player.prepare(); player.play()
+            } catch (e: Exception) { showHud("Fallback failed: ${e.message}", 4000) }
+        }
+    }
+
     // ================================================================= reporting & lifecycle
     private fun report(kind: String) {
         if (sourceId.isEmpty()) return
@@ -1294,8 +1385,50 @@ class PlayerActivity : ComponentActivity() {
         lifecycleScope.launch { Api.report(kind, id, src, pos, paused, tc, sid) }
     }
 
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (::player.isInitialized) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK, KeyEvent.KEYCODE_SPACE -> {
+                    if (player.isPlaying) player.pause() else player.play()
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PLAY -> { player.play(); return true }
+                KeyEvent.KEYCODE_MEDIA_PAUSE -> { player.pause(); return true }
+                KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                    if (hasNext) switchTo(siblings[siblingIndex + 1].id) else seekBy(30_000)
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                    if (hasPrev) switchTo(siblings[siblingIndex - 1].id) else player.seekTo(0)
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    seekBy(10_000); showHud("+10s"); return true
+                }
+                KeyEvent.KEYCODE_MEDIA_REWIND, KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    seekBy(-10_000); showHud("-10s"); return true
+                }
+                KeyEvent.KEYCODE_VOLUME_UP -> {
+                    if (audio.getStreamVolume(AudioManager.STREAM_MUSIC) >= maxVol() && boostPct < 200) {
+                        boostPct = minOf(200, boostPct + 10); applyBoost()
+                        volLabel.text = "${volumePercent()}%"; showHud("Volume ${volumePercent()}%")
+                        return true
+                    }
+                }
+                KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                    if (boostPct > 100) {
+                        boostPct = maxOf(100, boostPct - 10); applyBoost()
+                        volLabel.text = "${volumePercent()}%"; showHud("Volume ${volumePercent()}%")
+                        return true
+                    }
+                }
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     override fun onUserLeaveHint() {
-        if (::player.isInitialized && player.isPlaying) enterPip()
+        if (::player.isInitialized && player.isPlaying && pipSupported()) enterPip()
     }
 
     override fun onPictureInPictureModeChanged(isInPip: Boolean, newConfig: Configuration) {

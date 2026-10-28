@@ -170,11 +170,11 @@ fun MainShell(onLogout: () -> Unit) {
                     NavTab.MOVIES -> LibraryTab("Movies", "Movie", onOpen, onSearch = { stack.add(Nav.Search) }, onSettings = openSettings)
                     NavTab.SHOWS -> LibraryTab("TV Shows", "Series", onOpen, onSearch = { stack.add(Nav.Search) }, onSettings = openSettings)
                     NavTab.LIST -> MyListTab(
-                        onOpen, onProfile = { stack.add(Nav.ClientSettings) },
+                        onOpen,
                         onSettings = openSettings, onSignOut = signOut,
                         onWeb = { u, t -> stack.add(Nav.Web(u, t)) }
                     )
-                    NavTab.DOWNLOADS -> DownloadsTab(onPlay, openSettings)
+                    NavTab.DOWNLOADS -> DownloadsTab(openSettings)
                 }
                 is Nav.Grid -> key(top) { GridScreen(top.item, onOpen, back) }
                 is Nav.Detail -> key(top) { DetailScreen(top.item, onOpen, onPlay, back) }

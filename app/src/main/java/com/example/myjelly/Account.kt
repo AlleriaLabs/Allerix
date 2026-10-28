@@ -378,7 +378,7 @@ fun PlaybackSettingsScreen(back: () -> Unit) {
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("player", Context.MODE_PRIVATE) }
     var quality by remember {
-        mutableStateOf(runCatching { Quality.valueOf(prefs.getString("quality", "ORIGINAL") ?: "ORIGINAL") }.getOrDefault(Quality.ORIGINAL))
+        mutableStateOf(runCatching { Quality.valueOf(prefs.getString("quality", "AUTO") ?: "AUTO") }.getOrDefault(Quality.AUTO))
     }
     var audio by remember {
         mutableStateOf(runCatching { AudioMode.valueOf(prefs.getString("audio", "ORIGINAL") ?: "ORIGINAL") }.getOrDefault(AudioMode.ORIGINAL))
@@ -388,6 +388,7 @@ fun PlaybackSettingsScreen(back: () -> Unit) {
     }
     var speed by remember { mutableStateOf(prefs.getFloat("speed", 1f)) }
     var autoPlay by remember { mutableStateOf(prefs.getBoolean("autoplay", true)) }
+    var saveData by remember { mutableStateOf(prefs.getBoolean("save_data", true)) }
     var dialog by remember { mutableStateOf(0) }
 
     Column(Modifier.fillMaxSize().background(BgDark)) {
@@ -397,6 +398,24 @@ fun PlaybackSettingsScreen(back: () -> Unit) {
             SettingsRow("🔊", "Audio output", audio.label) { dialog = 2 }
             SettingsRow("⏱", "Playback speed", speedLabel(speed)) { dialog = 3 }
             SettingsRow("⚙", "Decoder", "${decoder.label} · ${decoder.desc}") { dialog = 4 }
+            SettingsRow("📱", "This phone", "Decoders, HDR, audio output, network") { dialog = 5 }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Save data on mobile networks", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    Text("Auto mode lowers quality on mobile data", color = Grey, fontSize = 13.sp)
+                }
+                Switch(
+                    checked = saveData,
+                    onCheckedChange = { saveData = it; prefs.edit().putBoolean("save_data", it).apply() },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White, checkedTrackColor = Red,
+                        uncheckedThumbColor = Grey, uncheckedTrackColor = Color(0xFF333333)
+                    )
+                )
+            }
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -416,7 +435,7 @@ fun PlaybackSettingsScreen(back: () -> Unit) {
             }
         }
         Text(
-            "Quality and audio changes use server transcoding. \u201COriginal\u201D plays the file directly.",
+            "Auto checks what this phone can decode and only transcodes when needed. Other qualities always use server transcoding.",
             color = Dim, fontSize = 12.sp, modifier = Modifier.padding(20.dp)
         )
     }
@@ -430,6 +449,19 @@ fun PlaybackSettingsScreen(back: () -> Unit) {
             { speed = it; prefs.edit().putFloat("speed", it).apply() }, { dialog = 0 })
         4 -> ChoiceDialog("Decoder", DecoderMode.values().map { "${it.label} · ${it.desc}" to it }, decoder,
             { decoder = it; prefs.edit().putString("decoder", it.name).apply() }, { dialog = 0 })
+        5 -> AlertDialog(
+            onDismissRequest = { dialog = 0 }, containerColor = Color(0xFF181818),
+            title = { Text("This phone", color = Color.White) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Device.describe(ctx, null).forEach { (k, v) ->
+                        Text(k, color = Dim, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp))
+                        Text(v, color = Color.White, fontSize = 14.sp)
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { dialog = 0 }) { Text("Close", color = Grey) } }
+        )
         else -> {}
     }
 }
