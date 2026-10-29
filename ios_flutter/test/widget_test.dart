@@ -1,5 +1,7 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:allerix_ios/main.dart';
+import 'package:allerix_ios/jellyfin_client.dart';
 
 void main() {
   testWidgets('Allerix login screen shows branding and server field', (tester) async {
@@ -16,4 +18,4 @@ void main() {
   });
 }
 
-void _ignoreSession(dynamic session) {}
+void _ignoreSession(JellyfinSession session) {}
