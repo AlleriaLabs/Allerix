@@ -20,6 +20,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.withStyle
 import androidx.core.content.ContextCompat
 import android.widget.Toast
+import java.io.File
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
@@ -417,21 +418,16 @@ fun SearchScreen(onOpen: (Item) -> Unit, back: () -> Unit) {
     }
 }
 
-// ------------------------------------------------------------------ my list + profile
+// ------------------------------------------------------------------ my list
 @Composable
-fun MyListTab(
-    onOpen: (Item) -> Unit, onSettings: () -> Unit, onSignOut: () -> Unit,
-    onWeb: (String, String) -> Unit
-) {
-    val ctx = LocalContext.current
+fun MyListTab(onOpen: (Item) -> Unit, onSettings: () -> Unit) {
     var favs by remember { mutableStateOf<List<Item>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
-    var help by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         favs = runCatching { Api.favorites() }.getOrDefault(emptyList()); loading = false
     }
     AppBackground {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        Column(Modifier.fillMaxSize()) {
             Row(
                 Modifier.fillMaxWidth().padding(start = 20.dp, end = 16.dp, top = 14.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -442,55 +438,19 @@ fun MyListTab(
                     Text(Api.username.take(1).uppercase().ifEmpty { "A" }, color = Color.White, fontWeight = FontWeight.Bold)
                 }
             }
-            if (loading) CircularProgressIndicator(Modifier.padding(24.dp), color = Red)
-            else if (favs.isEmpty()) Text(
-                "Your list is empty. Tap “+ My List” on any title to save it here.",
-                color = Grey, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
-            ) else LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                items(favs, key = { it.id }) { MediaCard(it, Modifier.width(112.dp)) { onOpen(it) } }
-            }
-            Spacer(Modifier.height(20.dp))
-            Column(Modifier.padding(horizontal = 16.dp).fillMaxWidth().glass(20.dp).padding(vertical = 8.dp)) {
-                Box(Modifier.fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
-                    Image(painterResource(R.drawable.logo_banner), null, Modifier.height(34.dp).aspectRatio(4.198f))
+            Box(Modifier.fillMaxSize()) {
+                if (loading) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Red)
+                else if (favs.isEmpty()) Text(
+                    "Your list is empty. Tap “+ My List” on any title to save it here.",
+                    color = Grey, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
+                ) else LazyVerticalGrid(
+                    GridCells.Adaptive(110.dp), contentPadding = PaddingValues(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(favs, key = { it.id }) { MediaCard(it, Modifier.fillMaxWidth()) { onOpen(it) } }
                 }
-                ProfileRow("?", "Help & Support", "", { help = true })
-                ProfileRow("⎋", "Sign Out", "", onSignOut)
             }
-            Spacer(Modifier.height(24.dp))
         }
-    }
-    if (help) AlertDialog(
-        onDismissRequest = { help = false }, containerColor = Color(0xFF181818),
-        title = { Text("Help & Support", color = Color.White) },
-        text = {
-            Text(
-                "Forgot your password or need to update your email, Telegram or Discord? Use the account portal. " +
-                    "To ask for a movie or show, tap the settings icon at the top right, then Request a show.",
-                color = Grey, fontSize = 14.sp
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = { help = false; onWeb(Api.ACCOUNT_URL, "My account") }) {
-                Text("Open account portal", color = Red)
-            }
-        },
-        dismissButton = { TextButton(onClick = { help = false }) { Text("Close", color = Grey) } }
-    )
-}
-
-@Composable
-private fun ProfileRow(icon: String, title: String, subtitle: String, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(icon, fontSize = 20.sp, color = Color.White, modifier = Modifier.width(36.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, color = Color.White, fontSize = 16.sp)
-            if (subtitle.isNotEmpty()) Text(subtitle, color = Dim, fontSize = 12.sp)
-        }
-        Text("›", color = Grey, fontSize = 22.sp)
     }
 }
 
@@ -522,6 +482,9 @@ fun DownloadsTab(onSettings: () -> Unit) {
     val ctx = LocalContext.current
     var recs by remember { mutableStateOf(Downloads.list(ctx)) }
     var states by remember { mutableStateOf<Map<String, DlState>>(emptyMap()) }
+    LaunchedEffect(Unit) {
+        if (Downloads.ensureCovers(ctx)) recs = Downloads.list(ctx)
+    }
     LaunchedEffect(recs) {
         while (true) {
             states = recs.associate { it.id to Downloads.state(ctx, it) }
@@ -560,23 +523,43 @@ fun DownloadsTab(onSettings: () -> Unit) {
 
 @Composable
 private fun DownloadRow(rec: DownloadRec, st: DlState, onPlay: () -> Unit, onDelete: () -> Unit) {
+    val ctx = LocalContext.current
     val complete = st.status == android.app.DownloadManager.STATUS_SUCCESSFUL
     val failed = st.status == android.app.DownloadManager.STATUS_FAILED
     val pct = if (st.total > 0) ((st.done * 100) / st.total).toInt() else 0
+    val saved = Downloads.position(ctx, rec.id)
+    val runMs = rec.runtimeTicks / 10_000
+    val hasCover = rec.cover.isNotEmpty() && File(rec.cover).exists()
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp).glass(14.dp)
             .clickable(enabled = complete, onClick = onPlay).padding(10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(Modifier.size(44.dp).clip(CircleShape).background(Color(0x33FFFFFF)), contentAlignment = Alignment.Center) {
-            if (complete) SmallIcon(R.drawable.ic_play, Color.White, 22)
-            else SmallIcon(R.drawable.ic_download, Color.White, 22)
+        Box(Modifier.width(124.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp)).background(Color(0xFF1F1F23))) {
+            AsyncImage(
+                if (hasCover) File(rec.cover) else "${Api.base}/Items/${rec.id}/Images/Primary?maxWidth=600",
+                rec.title, Modifier.fillMaxSize(), contentScale = ContentScale.Crop
+            )
+            Box(
+                Modifier.align(Alignment.Center).size(34.dp).clip(CircleShape).background(Color(0x88000000)),
+                contentAlignment = Alignment.Center
+            ) {
+                SmallIcon(if (complete) R.drawable.ic_play else R.drawable.ic_download, Color.White, 20)
+            }
+            if (complete && runMs > 0 && saved > 0) LinearProgressIndicator(
+                progress = { (saved.toFloat() / runMs).coerceIn(0f, 1f) },
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(3.dp),
+                color = Red, trackColor = Color(0x66FFFFFF)
+            )
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(rec.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(rec.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
             val sub = when {
-                complete -> listOf(fmtSize(st.done), fmtRuntime(rec.runtimeTicks)).filter { it.isNotEmpty() }.joinToString("  ·  ")
+                complete -> listOf(
+                    fmtSize(st.done), fmtRuntime(rec.runtimeTicks),
+                    if (saved > 5_000) "Resume " + fmtClock(saved) else ""
+                ).filter { it.isNotEmpty() }.joinToString("  ·  ")
                 failed -> "Failed: ${Downloads.reasonText(st.reason)}. Delete and try again"
                 st.status == -1 -> "Unavailable"
                 else -> "Downloading… $pct%"

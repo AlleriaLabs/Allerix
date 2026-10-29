@@ -102,3 +102,8 @@ fun leftText(item: Item): String {
 
 fun fmtSize(bytes: Long): String =
     if (bytes >= 1_000_000_000L) "%.1f GB".format(bytes / 1e9) else "%.0f MB".format(bytes / 1e6)
+
+fun fmtClock(ms: Long): String {
+    val s = ms.coerceAtLeast(0L) / 1000
+    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s % 3600 / 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
+}

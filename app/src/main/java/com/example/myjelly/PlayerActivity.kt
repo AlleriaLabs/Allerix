@@ -474,8 +474,10 @@ class PlayerActivity : ComponentActivity() {
         layoutSubtitle()
         // keep the controls clear of the notch / camera cut-out
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
-            val i = insets.getInsets(WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.systemBars())
-            controls.setPadding(i.left, i.top, i.right, i.bottom)
+            val i = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
+            topBar.setPadding(dp(12) + i.left, dp(10) + i.top, dp(8) + i.right, dp(22))
+            (card.layoutParams as FrameLayout.LayoutParams).setMargins(dp(16) + i.left, 0, dp(16) + i.right, dp(14))
+            card.requestLayout()
             insets
         }
         ViewCompat.requestApplyInsets(root)
@@ -1055,6 +1057,7 @@ class PlayerActivity : ComponentActivity() {
                 spinner.visibility = if (state == Player.STATE_BUFFERING) View.VISIBLE else View.GONE
                 if (state == Player.STATE_READY) updateProgress()
                 if (state == Player.STATE_ENDED) {
+                    if (offlinePath != null) saveOfflinePosition()
                     if (autoPlayNext && hasNext) switchTo(siblings[siblingIndex + 1].id) else finish()
                 }
             }
@@ -1079,7 +1082,11 @@ class PlayerActivity : ComponentActivity() {
         val file = offlinePath
         if (file != null) {
             player.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(file))))
-            player.prepare(); player.playWhenReady = true
+            player.prepare()
+            val saved = Downloads.position(this@PlayerActivity, itemId)
+            if (saved > 5_000) { player.seekTo(saved); showHud("Resuming at " + fmt(saved), 1500) }
+            player.playWhenReady = true
+            handler.postDelayed(progressTick, 10_000)
             return@launch
         }
         try {
@@ -1378,7 +1385,13 @@ class PlayerActivity : ComponentActivity() {
     }
 
     // ================================================================= reporting & lifecycle
+    private fun saveOfflinePosition() {
+        if (offlinePath == null || !::player.isInitialized) return
+        Downloads.savePosition(this, itemId, player.currentPosition, player.duration)
+    }
+
     private fun report(kind: String) {
+        if (offlinePath != null) { if (kind != "start") saveOfflinePosition(); return }
         if (sourceId.isEmpty()) return
         val id = itemId; val src = sourceId; val sid = sessionId
         val pos = player.currentPosition; val paused = !player.isPlaying; val tc = isTranscoding
@@ -1439,12 +1452,19 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        saveOfflinePosition()
         if (::player.isInitialized && !isInPictureInPictureMode) player.pause()
     }
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         if (!::player.isInitialized) { super.onDestroy(); return }
+        if (offlinePath != null) {
+            saveOfflinePosition()
+            // best effort: tell the server too, so Continue Watching stays in step when you're online
+            val pos = player.currentPosition; val id = itemId
+            CoroutineScope(Dispatchers.IO).launch { Api.report("stop", id, id, pos, true, false, "") }
+        }
         if (sourceId.isNotEmpty()) {
             val pos = player.currentPosition; val id = itemId; val src = sourceId
             val tc = isTranscoding; val sid = sessionId

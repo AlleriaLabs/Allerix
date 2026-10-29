@@ -13,7 +13,8 @@ import java.io.File
 
 @Serializable
 data class DownloadRec(
-    val id: String, val title: String, val file: String, val dmId: Long, val runtimeTicks: Long = 0L
+    val id: String, val title: String, val file: String, val dmId: Long, val runtimeTicks: Long = 0L,
+    val cover: String = ""
 )
 
 data class DlState(val status: Int, val done: Long, val total: Long, val reason: Int = 0)
@@ -76,7 +77,52 @@ object Downloads {
         val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
         runCatching { dm.remove(rec.dmId) }
         runCatching { File(rec.file).delete() }
+        runCatching { coverFile(ctx, rec.id).delete() }
+        ctx.getSharedPreferences("offline_pos", Context.MODE_PRIVATE).edit().remove("pos_${rec.id}").apply()
         save(ctx, list(ctx).filter { it.id != rec.id })
+    }
+
+    // ---- cover images are saved locally so they show even without internet
+    private fun coverFile(ctx: Context, id: String): File {
+        val dir = File(ctx.filesDir, "covers")
+        dir.mkdirs()
+        return File(dir, "$id.jpg")
+    }
+
+    private suspend fun saveCover(ctx: Context, item: Item): String {
+        return try {
+            val bytes = Api.fetchBytes(Api.landscape(item))
+            if (bytes.isEmpty()) "" else {
+                val f = coverFile(ctx, item.id)
+                f.writeBytes(bytes)
+                f.absolutePath
+            }
+        } catch (e: Exception) { "" }
+    }
+
+    /** Fetches covers for downloads that don't have one yet (e.g. made before covers were saved). */
+    suspend fun ensureCovers(ctx: Context): Boolean {
+        val current = list(ctx)
+        var changed = false
+        val updated = current.map { r ->
+            if (r.cover.isNotEmpty() && File(r.cover).exists()) r else {
+                val c = try { saveCover(ctx, Api.item(r.id)) } catch (e: Exception) { "" }
+                if (c.isNotEmpty()) { changed = true; r.copy(cover = c) } else r
+            }
+        }
+        if (changed) save(ctx, updated)
+        return changed
+    }
+
+    // ---- where you left off in a downloaded video (works without internet)
+    fun position(ctx: Context, id: String): Long =
+        ctx.getSharedPreferences("offline_pos", Context.MODE_PRIVATE).getLong("pos_$id", 0L)
+
+    fun savePosition(ctx: Context, id: String, posMs: Long, durMs: Long) {
+        val e = ctx.getSharedPreferences("offline_pos", Context.MODE_PRIVATE).edit()
+        if (durMs > 0 && posMs > durMs - 30_000) e.remove("pos_$id")
+        else if (posMs >= 5_000) e.putLong("pos_$id", posMs)
+        e.apply()
     }
 
     /** Returns a short message for the user. */
@@ -111,7 +157,8 @@ object Downloads {
                 .setDestinationInExternalFilesDir(ctx, Environment.DIRECTORY_MOVIES, name)
             val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
             val dmId = dm.enqueue(req)
-            save(ctx, list(ctx) + DownloadRec(item.id, title, target.absolutePath, dmId, full.runTimeTicks ?: item.runTimeTicks ?: 0L))
+            val cover = saveCover(ctx, full)
+            save(ctx, list(ctx) + DownloadRec(item.id, title, target.absolutePath, dmId, full.runTimeTicks ?: item.runTimeTicks ?: 0L, cover))
             return "Download started"
         } catch (e: Exception) {
             return "Couldn't start download (${e.message})"

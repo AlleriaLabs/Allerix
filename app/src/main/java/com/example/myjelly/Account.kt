@@ -128,18 +128,38 @@ private fun SettingsRow(icon: String, title: String, subtitle: String, onClick: 
 
 @Composable
 fun SettingsMenuScreen(
-    back: () -> Unit, onRequest: () -> Unit, onClient: () -> Unit, onPlayback: () -> Unit, onSignOut: () -> Unit
+    back: () -> Unit, onRequest: () -> Unit, onClient: () -> Unit, onPlayback: () -> Unit,
+    onSignOut: () -> Unit, onWeb: (String, String) -> Unit
 ) {
+    var help by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().background(BgDark)) {
         ScreenHeader("Settings", back)
         SettingsRow("🎬", "Request a show", "Ask for a movie, series or anime to be added", onRequest)
         SettingsRow("▶", "Playback settings", "Quality, audio, speed, auto-play", onPlayback)
         SettingsRow("⚙", "Client settings", "Server address and password", onClient)
+        SettingsRow("?", "Help & Support", "Account portal and password reset") { help = true }
         SettingsRow("⎋", "Sign out", "", onSignOut)
         Spacer(Modifier.weight(1f))
         Text("Alleria Filmotheque 1.0", color = Color(0xFF666666), fontSize = 12.sp,
             modifier = Modifier.padding(20.dp))
     }
+    if (help) AlertDialog(
+        onDismissRequest = { help = false }, containerColor = Color(0xFF181818),
+        title = { Text("Help & Support", color = Color.White) },
+        text = {
+            Text(
+                "Forgot your password or need to update your email, Telegram or Discord? Use the account portal. " +
+                    "To ask for a movie or show, choose Request a show in this menu.",
+                color = Grey, fontSize = 14.sp
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { help = false; onWeb(Api.ACCOUNT_URL, "My account") }) {
+                Text("Open account portal", color = Red)
+            }
+        },
+        dismissButton = { TextButton(onClick = { help = false }) { Text("Close", color = Grey) } }
+    )
 }
 
 @Composable
